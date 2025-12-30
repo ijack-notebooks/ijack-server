@@ -12,6 +12,7 @@ app.use(
   cors({
     origin: [
       "https://ijack-web.onrender.com",
+      "https://ijack-web.vercel.app",
       "http://localhost:3000", // For local development
       process.env.FRONTEND_URL, // Allow custom frontend URL from env
     ].filter(Boolean), // Remove undefined values
