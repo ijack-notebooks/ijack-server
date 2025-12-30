@@ -56,6 +56,16 @@ router.get("/stats", adminAuth, async (req, res) => {
   }
 });
 
+// Get all categories (must be before /orders/:id to avoid route conflict)
+router.get("/categories", adminAuth, async (req, res) => {
+  try {
+    const categories = await Notebook.distinct("category");
+    res.json(categories);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // Get single order (admin)
 router.get("/orders/:id", adminAuth, async (req, res) => {
   try {
@@ -102,6 +112,61 @@ router.patch("/orders/:id/status", adminAuth, async (req, res) => {
     }
 
     res.json(order);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Create new product
+router.post("/products", adminAuth, async (req, res) => {
+  try {
+    const notebook = new Notebook(req.body);
+    await notebook.save();
+    res.status(201).json(notebook);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Update product
+router.put("/products/:id", adminAuth, async (req, res) => {
+  try {
+    const notebook = await Notebook.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true, runValidators: true }
+    );
+
+    if (!notebook) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    res.json(notebook);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Delete product
+router.delete("/products/:id", adminAuth, async (req, res) => {
+  try {
+    const notebook = await Notebook.findByIdAndDelete(req.params.id);
+
+    if (!notebook) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    res.json({ message: "Product deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Delete all products
+router.delete("/products", adminAuth, async (req, res) => {
+  try {
+    await Notebook.deleteMany({});
+    res.json({ message: "All products deleted successfully" });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
