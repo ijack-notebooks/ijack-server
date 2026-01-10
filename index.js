@@ -13,7 +13,8 @@ app.use(
     origin: [
       "https://ijack-web.onrender.com",
       "https://ijack-web.vercel.app",
-      "https://www.ijackstore.com/",
+      "https://www.ijackstore.com",
+      "https://ijackstore.com",
       "http://localhost:3000", // For local development
       process.env.FRONTEND_URL, // Allow custom frontend URL from env
     ].filter(Boolean), // Remove undefined values
