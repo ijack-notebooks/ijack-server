@@ -179,35 +179,51 @@ router.patch("/orders/:id/status", adminAuth, async (req, res) => {
 });
 
 // Create new product with image upload
-router.post("/products", adminAuth, upload.single("image"), async (req, res) => {
-  try {
-    const productData = {
-      ...req.body,
-      price: parseFloat(req.body.price),
-      pages: parseInt(req.body.pages),
-      stockQuantity: parseInt(req.body.stockQuantity),
-      inStock: req.body.inStock === "true" || req.body.inStock === true,
-    };
-
-    // Add image path if file was uploaded
-    if (req.file) {
-      productData.image = `/uploads/images/${req.file.filename}`;
-    }
-
-    const notebook = new Notebook(productData);
-    await notebook.save();
-    res.status(201).json(notebook);
-  } catch (error) {
-    // Delete uploaded file if product creation fails
-    if (req.file) {
-      const fs = require("fs");
-      const filePath = path.join(__dirname, "../uploads/images", req.file.filename);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+router.post("/products", adminAuth, (req, res) => {
+  upload.single("image")(req, res, async (err) => {
+    try {
+      // Handle Multer errors gracefully
+      if (err) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return res
+            .status(400)
+            .json({ message: "Image too large. Max 10MB allowed." });
+        }
+        return res.status(400).json({ message: err.message || "Upload error" });
       }
+
+      const productData = {
+        ...req.body,
+        price: parseFloat(req.body.price),
+        pages: parseInt(req.body.pages),
+        stockQuantity: parseInt(req.body.stockQuantity),
+        inStock: req.body.inStock === "true" || req.body.inStock === true,
+      };
+
+      // Add image path if file was uploaded
+      if (req.file) {
+        productData.image = `/uploads/images/${req.file.filename}`;
+      }
+
+      const notebook = new Notebook(productData);
+      await notebook.save();
+      res.status(201).json(notebook);
+    } catch (error) {
+      // Delete uploaded file if product creation fails
+      if (req.file) {
+        const fs = require("fs");
+        const filePath = path.join(
+          __dirname,
+          "../uploads/images",
+          req.file.filename
+        );
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }
+      res.status(500).json({ message: error.message });
     }
-    res.status(500).json({ message: error.message });
-  }
+  });
 });
 
 // Update product
