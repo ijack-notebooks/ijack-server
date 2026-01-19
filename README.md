@@ -13,7 +13,7 @@ npm install
 2. Create a `.env` file in the root directory:
 
 ```env
-PORT=5000
+PORT=5002
 MONGODB_URI=mongodb://localhost:27017/ijack-notebooks
 JWT_SECRET=your-secret-key-change-in-production
 ```
@@ -42,7 +42,7 @@ This will create:
 npm start
 ```
 
-The server will run on `http://localhost:5000` (or the port specified in `.env`).
+The server will run on `http://localhost:5002` (or the port specified in `.env`).
 
 ## API Endpoints
 
