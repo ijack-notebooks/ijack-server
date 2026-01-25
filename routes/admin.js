@@ -7,6 +7,7 @@ const Notebook = require("../models/Notebook");
 const Category = require("../models/Category");
 const { adminAuth } = require("../middleware/adminAuth");
 const upload = require("../middleware/upload");
+const { updateOrderInSupabase } = require("../utils/supabaseOrders");
 
 // Get all orders (admin only)
 router.get("/orders", adminAuth, async (req, res) => {
@@ -186,6 +187,13 @@ router.patch("/orders/:id/status", adminAuth, async (req, res) => {
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
+
+    // Update order in Supabase
+    updateOrderInSupabase(order._id.toString(), {
+      status: order.status,
+    }).catch((err) => {
+      console.error("Failed to update order in Supabase:", err);
+    });
 
     res.json(order);
   } catch (error) {

@@ -88,6 +88,18 @@ BACKEND_URL=https://your-backend-url.com
 
 **Note:** The integration uses PhonePe's Standard Checkout API v2. Make sure to configure the webhook URL in your PhonePe merchant dashboard.
 
+### Supabase Integration (PostgreSQL for Financial Data)
+- Orders are automatically synced to Supabase PostgreSQL database for financial reporting and analytics
+- See `SUPABASE_SETUP.md` for detailed setup instructions
+- SQL schema file: `supabase-schema.sql`
+
+**Supabase Configuration:**
+Add the following to your `.env` file:
+```env
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+```
+
 ### Health
 - `GET /` - Welcome message
 - `GET /health` - Health check with database connection status

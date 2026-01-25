@@ -3,6 +3,7 @@ const router = express.Router();
 const Order = require("../models/Order");
 const Notebook = require("../models/Notebook");
 const { auth } = require("../middleware/auth");
+const { storeOrderInSupabase } = require("../utils/supabaseOrders");
 
 // Create order
 router.post("/", auth, async (req, res) => {
@@ -50,6 +51,21 @@ router.post("/", auth, async (req, res) => {
     });
 
     await order.save();
+
+    // Sync order to Supabase (async, don't wait)
+    // Populate order data for Supabase sync
+    (async () => {
+      try {
+        const populatedOrder = await Order.populate(order, [
+          { path: "user", select: "username email" },
+          { path: "items.notebook" }
+        ]);
+        await storeOrderInSupabase(populatedOrder);
+      } catch (err) {
+        console.error("Failed to sync order to Supabase:", err);
+        // Don't throw - allow order creation to continue even if Supabase sync fails
+      }
+    })();
 
     // Update stock quantities
     for (const item of items) {

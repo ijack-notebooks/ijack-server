@@ -41,6 +41,14 @@ app.use("/api/payment", require("./routes/payment"));
 app.use("/api/admin/auth", require("./routes/adminAuth"));
 app.use("/api/admin", require("./routes/admin"));
 
+// Supabase routes (for financial data)
+try {
+  app.use("/api/supabase", require("./routes/supabase"));
+  console.log("✅ Supabase routes registered");
+} catch (error) {
+  console.warn("⚠️  Failed to load Supabase routes:", error.message);
+}
+
 // Basic route
 app.get("/", (req, res) => {
   res.json({ message: "Ijack Notebooks Server is running!" });

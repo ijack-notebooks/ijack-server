@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const Order = require("../models/Order");
 const Notebook = require("../models/Notebook");
 const { auth } = require("../middleware/auth");
+const { storeOrderInSupabase, updateOrderInSupabase } = require("../utils/supabaseOrders");
 
 // PhonePe Configuration
 const PHONEPE_MERCHANT_ID = process.env.PHONEPE_MERCHANT_ID;
@@ -137,6 +138,21 @@ router.post("/initiate", auth, async (req, res) => {
     });
 
     await order.save();
+
+    // Sync order to Supabase (async, don't wait)
+    // Populate order data for Supabase sync
+    (async () => {
+      try {
+        const populatedOrder = await Order.populate(order, [
+          { path: "user", select: "username email" },
+          { path: "items.notebook" }
+        ]);
+        await storeOrderInSupabase(populatedOrder);
+      } catch (err) {
+        console.error("Failed to sync order to Supabase:", err);
+        // Don't throw - allow payment to continue even if Supabase sync fails
+      }
+    })();
 
     // Get access token
     const token = await getAccessToken();
@@ -312,6 +328,16 @@ router.get("/status/:merchantOrderId", auth, async (req, res) => {
         }
 
         await order.save();
+
+        // Update order in Supabase if payment status changed
+        if (paymentData.state === "COMPLETED" || hasSuccessfulPayment) {
+          updateOrderInSupabase(order._id.toString(), {
+            status: order.status,
+            payment: order.payment,
+          }).catch((err) => {
+            console.error("Failed to update order in Supabase:", err);
+          });
+        }
       }
     } catch (statusError) {
       console.error("PhonePe Status API error:", {
@@ -372,8 +398,23 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
               $inc: { stockQuantity: -item.quantity },
             });
           }
+
+          // Update order in Supabase
+          updateOrderInSupabase(order._id.toString(), {
+            status: order.status,
+            payment: order.payment,
+          }).catch((err) => {
+            console.error("Failed to update order in Supabase:", err);
+          });
         } else if (webhookData.code === "PAYMENT_ERROR" || webhookData.state === "FAILED") {
           order.payment.paymentStatus = "FAILED";
+
+          // Update order in Supabase
+          updateOrderInSupabase(order._id.toString(), {
+            payment: order.payment,
+          }).catch((err) => {
+            console.error("Failed to update order in Supabase:", err);
+          });
         }
 
         await order.save();
