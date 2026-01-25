@@ -61,6 +61,33 @@ The server will run on `http://localhost:5002` (or the port specified in `.env`)
 - `GET /api/orders/my-orders` - Get user's orders (requires auth)
 - `GET /api/orders/:id` - Get single order (requires auth)
 
+### Payment (PhonePe Integration)
+- `POST /api/payment/initiate` - Initiate payment and create order (requires auth)
+  - Creates an order in the database and initiates PhonePe payment
+  - Returns `redirectUrl` to redirect user to PhonePe checkout page
+- `GET /api/payment/status/:merchantOrderId` - Check payment status (requires auth)
+  - Checks payment status with PhonePe API
+  - Updates order status and stock quantities if payment is successful
+- `POST /api/payment/webhook` - PhonePe webhook handler (no auth required)
+  - Receives payment callbacks from PhonePe
+  - Updates order status and stock quantities automatically
+
+**PhonePe Configuration:**
+Add the following to your `.env` file:
+```env
+PHONEPE_MERCHANT_ID=your-merchant-id
+PHONEPE_SALT_KEY=your-salt-key
+PHONEPE_SALT_INDEX=1
+PHONEPE_CLIENT_ID=your-client-id
+PHONEPE_CLIENT_SECRET=your-client-secret
+PHONEPE_CLIENT_VERSION=1.0
+PHONEPE_ENVIRONMENT=SANDBOX  # or PRODUCTION for live payments
+FRONTEND_URL=https://your-frontend-url.com
+BACKEND_URL=https://your-backend-url.com
+```
+
+**Note:** The integration uses PhonePe's Standard Checkout API v2. Make sure to configure the webhook URL in your PhonePe merchant dashboard.
+
 ### Health
 - `GET /` - Welcome message
 - `GET /health` - Health check with database connection status

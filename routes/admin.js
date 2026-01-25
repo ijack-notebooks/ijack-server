@@ -25,7 +25,12 @@ router.get("/orders", adminAuth, async (req, res) => {
 router.get("/stats", adminAuth, async (req, res) => {
   try {
     const totalOrders = await Order.countDocuments();
+    
+    // Only count revenue from successful payments
     const totalRevenue = await Order.aggregate([
+      {
+        $match: { "payment.paymentStatus": "SUCCESS" }
+      },
       {
         $group: {
           _id: null,
@@ -43,6 +48,15 @@ router.get("/stats", adminAuth, async (req, res) => {
       },
     ]);
 
+    const paymentStats = await Order.aggregate([
+      {
+        $group: {
+          _id: "$payment.paymentStatus",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
     const recentOrders = await Order.find()
       .populate("user", "username")
       .sort({ createdAt: -1 })
@@ -52,6 +66,7 @@ router.get("/stats", adminAuth, async (req, res) => {
       totalOrders,
       totalRevenue: totalRevenue[0]?.total || 0,
       ordersByStatus,
+      paymentStats,
       recentOrders,
     });
   } catch (error) {

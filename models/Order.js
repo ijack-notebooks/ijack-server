@@ -69,6 +69,26 @@ const OrderSchema = new mongoose.Schema({
     enum: ["pending", "processing", "shipped", "delivered", "cancelled"],
     default: "pending",
   },
+  payment: {
+    merchantOrderId: {
+      type: String,
+      unique: true,
+    },
+    phonepeTransactionId: {
+      type: String,
+    },
+    paymentStatus: {
+      type: String,
+      enum: ["PENDING", "SUCCESS", "FAILED", "CANCELLED"],
+      default: "PENDING",
+    },
+    paymentMethod: {
+      type: String,
+    },
+    amount: {
+      type: Number,
+    },
+  },
   createdAt: {
     type: Date,
     default: Date.now,

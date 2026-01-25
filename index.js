@@ -37,6 +37,7 @@ connectDB();
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/notebooks", require("./routes/notebooks"));
 app.use("/api/orders", require("./routes/orders"));
+app.use("/api/payment", require("./routes/payment"));
 app.use("/api/admin/auth", require("./routes/adminAuth"));
 app.use("/api/admin", require("./routes/admin"));
 
