@@ -89,6 +89,16 @@ const OrderSchema = new mongoose.Schema({
       type: Number,
     },
   },
+  shiprocket: {
+    orderId: { type: Number },
+    shipmentId: { type: Number },
+    awbCode: { type: String },
+    courierName: { type: String },
+    labelUrl: { type: String },
+    trackingStatus: { type: String },
+    trackingUrl: { type: String },
+    createdAt: { type: Date, default: Date.now },
+  },
   createdAt: {
     type: Date,
     default: Date.now,

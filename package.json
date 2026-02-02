@@ -8,6 +8,8 @@
     "dev": "node index.js",
     "seed": "node scripts/seed.js",
     "seed-admin": "node scripts/seedAdmin.js",
+    "cleanup-images": "node scripts/cleanupOldImages.js",
+    "create-bucket": "node scripts/createStorageBucket.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "shreyansh",

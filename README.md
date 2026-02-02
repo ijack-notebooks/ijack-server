@@ -88,9 +88,11 @@ BACKEND_URL=https://your-backend-url.com
 
 **Note:** The integration uses PhonePe's Standard Checkout API v2. Make sure to configure the webhook URL in your PhonePe merchant dashboard.
 
-### Supabase Integration (PostgreSQL for Financial Data)
+### Supabase Integration (PostgreSQL for Financial Data & Storage)
 - Orders are automatically synced to Supabase PostgreSQL database for financial reporting and analytics
-- See `SUPABASE_SETUP.md` for detailed setup instructions
+- Product images are stored in Supabase Storage bucket `product-images`
+- See `SUPABASE_SETUP.md` for database setup instructions
+- See `SUPABASE_STORAGE_SETUP.md` for storage bucket setup instructions
 - SQL schema file: `supabase-schema.sql`
 
 **Supabase Configuration:**
@@ -98,6 +100,22 @@ Add the following to your `.env` file:
 ```env
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+```
+
+**Cleanup Script:**
+To delete old product images from server folder:
+```bash
+npm run cleanup-images
+```
+
+### Shiprocket (Delivery)
+- Admin can create shipments from orders and get labels/tracking via **Admin Panel → Orders → View → Shiprocket Delivery**.
+- See `SHIPROCKET_INTEGRATION.md` for setup and manual steps.
+- **Test mode:** Set `SHIPROCKET_TEST_MODE=true` in `.env` to test the flow without real API calls or shipments (no credentials needed).
+- For live use, add to `.env` (use API user credentials from Shiprocket Settings → API):
+```env
+SHIPROCKET_EMAIL=your-api-user-email@example.com
+SHIPROCKET_PASSWORD=your-api-user-password
 ```
 
 ### Health

@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const path = require("path");
+const fs = require("fs");
 const Order = require("../models/Order");
 const User = require("../models/User");
 const Notebook = require("../models/Notebook");
@@ -8,6 +9,11 @@ const Category = require("../models/Category");
 const { adminAuth } = require("../middleware/adminAuth");
 const upload = require("../middleware/upload");
 const { updateOrderInSupabase } = require("../utils/supabaseOrders");
+const {
+  uploadImageToSupabase,
+  deleteImageFromSupabase,
+  deleteLocalImage,
+} = require("../utils/supabaseStorage");
 
 // Get all orders (admin only)
 router.get("/orders", adminAuth, async (req, res) => {
@@ -26,11 +32,11 @@ router.get("/orders", adminAuth, async (req, res) => {
 router.get("/stats", adminAuth, async (req, res) => {
   try {
     const totalOrders = await Order.countDocuments();
-    
+
     // Only count revenue from successful payments
     const totalRevenue = await Order.aggregate([
       {
-        $match: { "payment.paymentStatus": "SUCCESS" }
+        $match: { "payment.paymentStatus": "SUCCESS" },
       },
       {
         $group: {
@@ -78,16 +84,26 @@ router.get("/stats", adminAuth, async (req, res) => {
 // Get all categories (must be before /orders/:id to avoid route conflict)
 router.get("/categories", adminAuth, async (req, res) => {
   try {
-    // Get categories from Category model
-    const categories = await Category.find().sort({ name: 1 });
-    const categoryNames = categories.map((cat) => cat.name);
-    
-    // Also get categories from existing products (for backward compatibility)
+    const categoryDocs = await Category.find().sort({ name: 1 });
     const productCategories = await Notebook.distinct("category");
-    
-    // Merge and deduplicate
-    const allCategories = [...new Set([...categoryNames, ...productCategories])];
-    res.json(allCategories);
+    const allNames = [
+      ...new Set([...categoryDocs.map((c) => c.name), ...productCategories]),
+    ];
+    const byName = Object.fromEntries(categoryDocs.map((c) => [c.name, c]));
+
+    const categories = allNames.map((name) => {
+      const doc = byName[name];
+      return doc
+        ? {
+            _id: doc._id,
+            name: doc.name,
+            description: doc.description,
+            hsn: doc.hsn ?? "",
+            gstPercentage: doc.gstPercentage ?? 0,
+          }
+        : { name, _id: null, description: "", hsn: "", gstPercentage: 0 };
+    });
+    res.json(categories);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -96,32 +112,84 @@ router.get("/categories", adminAuth, async (req, res) => {
 // Create new category
 router.post("/categories", adminAuth, async (req, res) => {
   try {
-    const { name, description } = req.body;
-    
+    const { name, description, hsn, gstPercentage } = req.body;
+
     if (!name || !name.trim()) {
       return res.status(400).json({ message: "Category name is required" });
     }
 
-    // Check if category already exists
-    const existingCategory = await Category.findOne({ 
-      name: name.trim() 
+    const existingCategory = await Category.findOne({
+      name: name.trim(),
     });
-    
+
     if (existingCategory) {
       return res.status(400).json({ message: "Category already exists" });
     }
 
+    const gst = gstPercentage != null ? Number(gstPercentage) : 0;
     const category = new Category({
       name: name.trim(),
       description: description || "",
+      hsn: hsn != null ? String(hsn).trim() : "",
+      gstPercentage: Math.min(100, Math.max(0, isNaN(gst) ? 0 : gst)),
     });
-    
+
     await category.save();
     res.status(201).json(category);
   } catch (error) {
     if (error.code === 11000) {
-      // Duplicate key error
       res.status(400).json({ message: "Category already exists" });
+    } else {
+      res.status(500).json({ message: error.message });
+    }
+  }
+});
+
+// Update category
+router.patch("/categories/:id", adminAuth, async (req, res) => {
+  try {
+    const category = await Category.findById(req.params.id);
+
+    if (!category) {
+      return res.status(404).json({ message: "Category not found" });
+    }
+
+    const { name, description, hsn, gstPercentage } = req.body;
+    const oldName = category.name;
+    const newName = name != null ? String(name).trim() : oldName;
+
+    if (!newName) {
+      return res.status(400).json({ message: "Category name cannot be empty" });
+    }
+
+    if (newName !== oldName) {
+      const existing = await Category.findOne({ name: newName });
+      if (existing) {
+        return res
+          .status(400)
+          .json({ message: "A category with that name already exists" });
+      }
+      await Notebook.updateMany(
+        { category: oldName },
+        { $set: { category: newName } }
+      );
+    }
+
+    if (description !== undefined) category.description = description;
+    if (name !== undefined) category.name = newName;
+    if (hsn !== undefined) category.hsn = String(hsn ?? "").trim();
+    if (gstPercentage !== undefined) {
+      const gst = Number(gstPercentage);
+      category.gstPercentage = Math.min(100, Math.max(0, isNaN(gst) ? 0 : gst));
+    }
+
+    await category.save();
+    res.json(category);
+  } catch (error) {
+    if (error.code === 11000) {
+      res
+        .status(400)
+        .json({ message: "A category with that name already exists" });
     } else {
       res.status(500).json({ message: error.message });
     }
@@ -132,7 +200,7 @@ router.post("/categories", adminAuth, async (req, res) => {
 router.delete("/categories/:id", adminAuth, async (req, res) => {
   try {
     const category = await Category.findByIdAndDelete(req.params.id);
-    
+
     if (!category) {
       return res.status(404).json({ message: "Category not found" });
     }
@@ -223,9 +291,64 @@ router.post("/products", adminAuth, (req, res) => {
         inStock: req.body.inStock === "true" || req.body.inStock === true,
       };
 
-      // Add image path if file was uploaded
+      // Upload image to Supabase Storage if file was uploaded (no local fallback)
       if (req.file) {
-        productData.image = `/uploads/images/${req.file.filename}`;
+        const supabase = require("../config/supabase");
+        if (!supabase) {
+          // Clean up multer's local file before returning error
+          try {
+            if (req.file.path && fs.existsSync(req.file.path)) {
+              fs.unlinkSync(req.file.path);
+            }
+          } catch (e) {
+            /* ignore */
+          }
+          return res.status(503).json({
+            message:
+              "Image storage is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to the server .env file and ensure the product-images bucket exists in Supabase.",
+          });
+        }
+
+        try {
+          const fileBuffer = fs.readFileSync(req.file.path);
+
+          const uploadResult = await uploadImageToSupabase(
+            fileBuffer,
+            req.file.filename,
+            req.file.mimetype
+          );
+
+          productData.image = uploadResult.publicUrl;
+
+          try {
+            fs.unlinkSync(req.file.path);
+            console.log(
+              "✅ Image uploaded to Supabase:",
+              uploadResult.publicUrl
+            );
+          } catch (deleteError) {
+            console.warn(
+              "Failed to delete local file after Supabase upload:",
+              deleteError
+            );
+          }
+        } catch (supabaseError) {
+          try {
+            if (req.file.path && fs.existsSync(req.file.path)) {
+              fs.unlinkSync(req.file.path);
+            }
+          } catch (e) {
+            /* ignore */
+          }
+          console.error("Supabase upload error:", supabaseError);
+          const message =
+            supabaseError.message ||
+            (supabaseError.error && supabaseError.error.message) ||
+            "Failed to upload image to storage.";
+          return res.status(502).json({
+            message: "Image upload failed: " + message,
+          });
+        }
       }
 
       const notebook = new Notebook(productData);
@@ -252,11 +375,10 @@ router.post("/products", adminAuth, (req, res) => {
 // Update product
 router.put("/products/:id", adminAuth, async (req, res) => {
   try {
-    const notebook = await Notebook.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true, runValidators: true }
-    );
+    const notebook = await Notebook.findByIdAndUpdate(req.params.id, req.body, {
+      new: true,
+      runValidators: true,
+    });
 
     if (!notebook) {
       return res.status(404).json({ message: "Product not found" });
@@ -277,12 +399,17 @@ router.delete("/products/:id", adminAuth, async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    // Delete associated image file if exists
+    // Delete image from Supabase Storage or local storage
     if (notebook.image) {
-      const fs = require("fs");
-      const filePath = path.join(__dirname, "../", notebook.image);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+      if (
+        notebook.image.includes("supabase.co") ||
+        notebook.image.includes("storage")
+      ) {
+        // Supabase storage URL
+        await deleteImageFromSupabase(notebook.image);
+      } else {
+        // Local storage
+        await deleteLocalImage(notebook.image);
       }
     }
 
@@ -298,17 +425,22 @@ router.delete("/products", adminAuth, async (req, res) => {
   try {
     // Get all products to delete their images
     const notebooks = await Notebook.find({});
-    const fs = require("fs");
-    
-    // Delete all image files
-    notebooks.forEach((notebook) => {
+
+    // Delete all image files (both Supabase and local)
+    for (const notebook of notebooks) {
       if (notebook.image) {
-        const filePath = path.join(__dirname, "../", notebook.image);
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
+        if (
+          notebook.image.includes("supabase.co") ||
+          notebook.image.includes("storage")
+        ) {
+          // Supabase storage URL
+          await deleteImageFromSupabase(notebook.image);
+        } else {
+          // Local storage
+          await deleteLocalImage(notebook.image);
         }
       }
-    });
+    }
 
     await Notebook.deleteMany({});
     res.json({ message: "All products deleted successfully" });
@@ -316,5 +448,23 @@ router.delete("/products", adminAuth, async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
+
+// Cleanup old product images from server folder
+router.post("/cleanup-images", adminAuth, async (req, res) => {
+  try {
+    const { cleanupOldImages } = require("../utils/supabaseStorage");
+    const deletedCount = await cleanupOldImages();
+    res.json({
+      message: "Cleanup completed successfully",
+      deletedCount,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Shiprocket shipping integration (admin only)
+const shiprocketRouter = require("./shiprocket");
+router.use("/shiprocket", shiprocketRouter);
 
 module.exports = router;

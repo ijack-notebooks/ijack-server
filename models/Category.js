@@ -11,6 +11,17 @@ const CategorySchema = new mongoose.Schema({
     type: String,
     default: "",
   },
+  hsn: {
+    type: String,
+    default: "",
+    trim: true,
+  },
+  gstPercentage: {
+    type: Number,
+    default: 0,
+    min: 0,
+    max: 100,
+  },
   createdAt: {
     type: Date,
     default: Date.now,
