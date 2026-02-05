@@ -452,11 +452,17 @@ router.patch("/products/:id", adminAuth, (req, res) => {
             /* ignore */
           }
 
-          // Delete old image from Supabase if it was stored there
-          if (existing.image && (existing.image.includes("supabase.co") || existing.image.includes("storage"))) {
-            await deleteImageFromSupabase(existing.image).catch((e) =>
-              console.warn("Failed to delete old Supabase image:", e)
-            );
+          // Delete old image when replacing with new one (Supabase or local)
+          if (existing.image) {
+            if (existing.image.includes("supabase.co") || existing.image.includes("storage")) {
+              await deleteImageFromSupabase(existing.image).catch((e) =>
+                console.warn("Failed to delete old Supabase image:", e)
+              );
+            } else {
+              await deleteLocalImage(existing.image).catch((e) =>
+                console.warn("Failed to delete old local image:", e)
+              );
+            }
           }
         } catch (supabaseError) {
           try {
