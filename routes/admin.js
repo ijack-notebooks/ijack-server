@@ -373,7 +373,7 @@ router.post("/products", adminAuth, (req, res) => {
   });
 });
 
-// Update product
+// Update product (JSON only, no image)
 router.put("/products/:id", adminAuth, async (req, res) => {
   try {
     const notebook = await Notebook.findByIdAndUpdate(req.params.id, req.body, {
@@ -389,6 +389,111 @@ router.put("/products/:id", adminAuth, async (req, res) => {
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
+});
+
+// Update product with optional image upload (multipart)
+router.patch("/products/:id", adminAuth, (req, res) => {
+  upload.single("image")(req, res, async (err) => {
+    try {
+      if (err) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return res
+            .status(400)
+            .json({ message: "Image too large. Max 10MB allowed." });
+        }
+        return res.status(400).json({ message: err.message || "Upload error" });
+      }
+
+      const existing = await Notebook.findById(req.params.id);
+      if (!existing) {
+        return res.status(404).json({ message: "Product not found" });
+      }
+
+      const update = {
+        name: req.body.name != null ? String(req.body.name).trim() : existing.name,
+        description: req.body.description != null ? String(req.body.description).trim() : existing.description,
+        price: req.body.price != null ? parseFloat(req.body.price) : existing.price,
+        category: req.body.category != null ? String(req.body.category).trim() : existing.category,
+        pages: req.body.pages != null ? parseInt(req.body.pages, 10) : existing.pages,
+        size: req.body.size != null ? String(req.body.size).trim() : existing.size,
+        stockQuantity: req.body.stockQuantity != null ? parseInt(req.body.stockQuantity, 10) : existing.stockQuantity,
+        weight: req.body.weight != null && req.body.weight !== "" ? Math.max(0, Number(req.body.weight)) : (existing.weight ?? 0),
+        inStock: req.body.inStock !== undefined ? (req.body.inStock === "true" || req.body.inStock === true) : existing.inStock,
+      };
+
+      if (req.file) {
+        const supabase = require("../config/supabase");
+        if (!supabase) {
+          try {
+            if (req.file.path && fs.existsSync(req.file.path)) {
+              fs.unlinkSync(req.file.path);
+            }
+          } catch (e) {
+            /* ignore */
+          }
+          return res.status(503).json({
+            message:
+              "Image storage is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to the server .env file and ensure the product-images bucket exists in Supabase.",
+          });
+        }
+
+        try {
+          const fileBuffer = fs.readFileSync(req.file.path);
+          const uploadResult = await uploadImageToSupabase(
+            fileBuffer,
+            req.file.filename,
+            req.file.mimetype
+          );
+          update.image = uploadResult.publicUrl;
+
+          try {
+            fs.unlinkSync(req.file.path);
+          } catch (deleteError) {
+            /* ignore */
+          }
+
+          // Delete old image from Supabase if it was stored there
+          if (existing.image && (existing.image.includes("supabase.co") || existing.image.includes("storage"))) {
+            await deleteImageFromSupabase(existing.image).catch((e) =>
+              console.warn("Failed to delete old Supabase image:", e)
+            );
+          }
+        } catch (supabaseError) {
+          try {
+            if (req.file.path && fs.existsSync(req.file.path)) {
+              fs.unlinkSync(req.file.path);
+            }
+          } catch (e) {
+            /* ignore */
+          }
+          console.error("Supabase upload error:", supabaseError);
+          const message =
+            supabaseError.message ||
+            (supabaseError.error && supabaseError.error.message) ||
+            "Failed to upload image to storage.";
+          return res.status(502).json({
+            message: "Image upload failed: " + message,
+          });
+        }
+      }
+
+      const notebook = await Notebook.findByIdAndUpdate(req.params.id, update, {
+        new: true,
+        runValidators: true,
+      });
+
+      res.json(notebook);
+    } catch (error) {
+      if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch (e) {
+          /* ignore */
+        }
+      }
+      res.status(500).json({ message: error.message });
+    }
+  });
 });
 
 // Delete product
