@@ -289,6 +289,7 @@ router.post("/products", adminAuth, (req, res) => {
         pages: parseInt(req.body.pages),
         stockQuantity: parseInt(req.body.stockQuantity),
         inStock: req.body.inStock === "true" || req.body.inStock === true,
+        weight: req.body.weight != null && req.body.weight !== "" ? Math.max(0, Number(req.body.weight)) : 0,
       };
 
       // Upload image to Supabase Storage if file was uploaded (no local fallback)

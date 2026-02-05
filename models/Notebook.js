@@ -38,6 +38,11 @@ const NotebookSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  weight: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
   createdAt: {
     type: Date,
     default: Date.now,
