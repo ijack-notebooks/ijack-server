@@ -3,6 +3,7 @@ const router = express.Router();
 const User = require("../models/User");
 const jwt = require("jsonwebtoken");
 const { JWT_SECRET } = require("../middleware/auth");
+const { OAuth2Client } = require("google-auth-library");
 
 // Generate JWT token
 const generateToken = (userId) => {
@@ -77,6 +78,69 @@ router.post("/login", async (req, res) => {
       },
     });
   } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Google OAuth (direct): verify Google ID token and issue our JWT
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+
+router.post("/google", async (req, res) => {
+  try {
+    const { id_token } = req.body;
+
+    if (!id_token) {
+      return res.status(400).json({ message: "Google ID token is required" });
+    }
+
+    if (!GOOGLE_CLIENT_ID) {
+      return res.status(503).json({
+        message: "Google sign-in is not configured. Set GOOGLE_CLIENT_ID in server .env",
+      });
+    }
+
+    const client = new OAuth2Client(GOOGLE_CLIENT_ID);
+    const ticket = await client.verifyIdToken({
+      idToken: id_token,
+      audience: GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    if (!payload || !payload.email) {
+      return res.status(401).json({ message: "Invalid or expired Google sign-in" });
+    }
+
+    const email = payload.email.toLowerCase().trim();
+    const name = payload.name || payload.given_name || email.split("@")[0];
+
+    let user = await User.findOne({ email });
+
+    if (!user) {
+      const username = email.replace(/@.*$/, "").replace(/[^a-z0-9]/gi, "_").toLowerCase() || "user";
+      let uniqueUsername = username;
+      let suffix = 0;
+      while (await User.findOne({ username: uniqueUsername })) {
+        uniqueUsername = `${username}${++suffix}`;
+      }
+      user = new User({
+        username: uniqueUsername,
+        email,
+        password: null,
+      });
+      await user.save();
+    }
+
+    const token = generateToken(user._id);
+
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+      },
+    });
+  } catch (error) {
+    console.error("Google auth error:", error);
     res.status(500).json({ message: error.message });
   }
 });
