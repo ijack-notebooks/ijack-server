@@ -4,6 +4,7 @@ const axios = require("axios");
 const crypto = require("crypto");
 const Order = require("../models/Order");
 const Notebook = require("../models/Notebook");
+const Category = require("../models/Category");
 const { auth } = require("../middleware/auth");
 const { storeOrderInSupabase, updateOrderInSupabase } = require("../utils/supabaseOrders");
 
@@ -95,8 +96,16 @@ router.post("/initiate", auth, async (req, res) => {
       return res.status(400).json({ message: "Contact details and address are required" });
     }
 
-    // Calculate total and validate items
-    let totalAmount = 0;
+    // Category name -> GST % (for GST calculation)
+    const categoryDocs = await Category.find({}).select("name gstPercentage").lean();
+    const gstByCategory = Object.fromEntries(
+      categoryDocs.map((c) => [c.name, Number(c.gstPercentage) || 0])
+    );
+
+    // Calculate subtotal, shipping, GST and total
+    let subtotal = 0;
+    let totalWeightGrams = 0;
+    let gstAmount = 0;
     const orderItems = [];
 
     for (const item of items) {
@@ -110,7 +119,10 @@ router.post("/initiate", auth, async (req, res) => {
       }
 
       const itemTotal = notebook.price * item.quantity;
-      totalAmount += itemTotal;
+      subtotal += itemTotal;
+      totalWeightGrams += (Number(notebook.weight) || 0) * item.quantity;
+      const gstPct = gstByCategory[notebook.category] ?? 0;
+      gstAmount += (itemTotal * gstPct) / 100;
 
       orderItems.push({
         notebook: notebook._id,
@@ -118,6 +130,11 @@ router.post("/initiate", auth, async (req, res) => {
         price: notebook.price,
       });
     }
+
+    // Shipping: Rs 26 per 500 grams
+    const shippingCharge = Math.ceil(totalWeightGrams / 500) * 26;
+
+    const totalAmount = Math.round(subtotal + shippingCharge + gstAmount);
 
     // Generate merchant order ID
     const merchantOrderId = generateMerchantOrderId();
