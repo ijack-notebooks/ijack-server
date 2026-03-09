@@ -22,7 +22,7 @@ const InvoiceSchema = new mongoose.Schema({
   /** Path in Supabase bucket "Invoices" (e.g. INV-202603-0001.pdf) */
   pdfPath: {
     type: String,
-    required: true,
+    default: null,
   },
   /**
    * Snapshot to regenerate PDF: { orderSnapshot: { contactDetails, address, createdAt, _id }, invoiceData: { lines, subtotal, ... } }
@@ -35,6 +35,12 @@ const InvoiceSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+  /** Set when invoice email was last sent successfully */
+  lastEmailSentAt: { type: Date },
+  /** Set when last send attempt failed */
+  lastEmailError: { type: String },
+  /** Set when invoice PDF could not be uploaded to Supabase */
+  lastStorageError: { type: String },
 });
 
 module.exports = mongoose.model("Invoice", InvoiceSchema);

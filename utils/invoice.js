@@ -119,7 +119,7 @@ async function buildInvoiceData(order) {
 
   for (let i = 0; i < order.items.length; i++) {
     const item = order.items[i];
-    const notebook = item.notebook;
+    const notebook = item.notebook || {};
     const taxableValue = item.price * item.quantity;
     const taxInfo = taxByCategory[notebook.category] || { gstPercentage: 0, hsn: HSN_DEFAULT };
     const gstPct = taxInfo.gstPercentage;
@@ -132,7 +132,7 @@ async function buildInvoiceData(order) {
 
     lines.push({
       sno: i + 1,
-      description: notebook.name,
+      description: notebook.name || `Product ${i + 1}`,
       hsn: taxInfo.hsn,
       qty: item.quantity,
       rate: item.price,
@@ -168,6 +168,10 @@ async function buildInvoiceData(order) {
 /**
  * Generate GST-compliant invoice PDF and return buffer
  */
+function formatMoney(value) {
+  return `₹${Number(value || 0).toFixed(2)}`;
+}
+
 async function buildInvoicePdf(order, invoiceNumber, invoiceData) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 50, size: "A4" });
@@ -176,99 +180,208 @@ async function buildInvoicePdf(order, invoiceNumber, invoiceData) {
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
 
+    const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+    const left = doc.page.margins.left;
+    const rightColX = left + 330;
+    const cardGap = 14;
+    const labelColor = "#64748b";
+    const dark = "#0f172a";
+    const border = "#cbd5e1";
+    const headerBg = "#eff6ff";
+    const accent = "#1d4ed8";
+    const soft = "#f8fafc";
     const dateStr = order.createdAt
       ? new Date(order.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" })
       : "—";
 
-    doc.fontSize(18).font("Helvetica-Bold").text("TAX INVOICE", { align: "center" });
-    doc.moveDown(0.5);
-    doc.fontSize(10).font("Helvetica");
-    doc.font("Helvetica-Bold").text("Supplier Details", { continued: false });
-    doc.font("Helvetica").text(SUPPLIER.name);
-    SUPPLIER.address.forEach((line) => doc.text(line));
-    doc.text(`Phone: ${SUPPLIER.phone}`);
-    doc.text(`Email: ${SUPPLIER.email}`);
-    doc.text(`GSTIN: ${SUPPLIER.gstin}`);
-    doc.text(`State Code: ${SUPPLIER.stateCode}`);
-    doc.moveDown(0.5);
-
-    doc.font("Helvetica-Bold").text("Invoice Details", { continued: false });
-    doc.font("Helvetica");
-    doc.text(`Invoice No: ${invoiceNumber}`);
-    doc.text(`Invoice Date: ${dateStr}`);
-    doc.text(`Order ID: ${order._id}`);
-    doc.text(`Place of Supply: ${invoiceData.placeOfSupply}`);
-    doc.text("Payment Mode: Prepaid");
-    doc.moveDown(0.5);
-
-    doc.font("Helvetica-Bold").text("Bill To (Customer)", { continued: false });
-    doc.font("Helvetica");
-    doc.text(order.contactDetails.name);
-    doc.text(order.address.street);
-    doc.text(`${order.address.city}, ${order.address.state} – ${order.address.zipCode}`);
-    doc.text(order.contactDetails.phone);
-    doc.text(order.contactDetails.email);
-    doc.moveDown(0.5);
-
-    doc.font("Helvetica-Bold").text("Product Details", { continued: false });
-    const tableTop = doc.y;
-    const colWidths = { sno: 28, desc: 120, hsn: 38, qty: 28, rate: 42, taxable: 52, gstPct: 36, gstAmt: 42, total: 48 };
-    const headers = ["S.No", "Product Description", "HSN", "Qty", "Rate (₹)", "Taxable (₹)", "GST %", "GST Amt", "Total (₹)"];
-    doc.font("Helvetica-Bold").fontSize(8);
-    let x = 50;
-    doc.text(headers[0], x, tableTop); x += colWidths.sno;
-    doc.text(headers[1], x, tableTop); x += colWidths.desc;
-    doc.text(headers[2], x, tableTop); x += colWidths.hsn;
-    doc.text(headers[3], x, tableTop); x += colWidths.qty;
-    doc.text(headers[4], x, tableTop); x += colWidths.rate;
-    doc.text(headers[5], x, tableTop); x += colWidths.taxable;
-    doc.text(headers[6], x, tableTop); x += colWidths.gstPct;
-    doc.text(headers[7], x, tableTop); x += colWidths.gstAmt;
-    doc.text(headers[8], x, tableTop);
-    doc.moveDown(0.3);
-    let rowY = doc.y;
-    doc.font("Helvetica").fontSize(8);
-    invoiceData.lines.forEach((row) => {
-      x = 50;
-      doc.text(String(row.sno), x, rowY); x += colWidths.sno;
-      doc.text(row.description.substring(0, 22), x, rowY); x += colWidths.desc;
-      doc.text(row.hsn, x, rowY); x += colWidths.hsn;
-      doc.text(String(row.qty), x, rowY); x += colWidths.qty;
-      doc.text(row.rate.toFixed(2), x, rowY); x += colWidths.rate;
-      doc.text(row.taxableValue.toFixed(2), x, rowY); x += colWidths.taxable;
-      doc.text(row.gstPct + "%", x, rowY); x += colWidths.gstPct;
-      doc.text(row.gstAmount.toFixed(2), x, rowY); x += colWidths.gstAmt;
-      doc.text(row.total.toFixed(2), x, rowY);
-      rowY += 18;
+    doc.roundedRect(left, 42, pageWidth, 92, 14).fill(headerBg);
+    doc.fillColor(accent).font("Helvetica-Bold").fontSize(12).text("I JACK PAPER PRODUCTS", left + 18, 58);
+    doc.fillColor(dark).font("Helvetica-Bold").fontSize(24).text("TAX INVOICE", left + 18, 76);
+    doc.fillColor(labelColor).font("Helvetica").fontSize(10).text("GST-compliant invoice under CGST Act, 2017", left + 18, 106);
+    doc.fillColor(dark).font("Helvetica-Bold").fontSize(12).text(invoiceNumber, left + pageWidth - 160, 62, {
+      width: 142,
+      align: "right",
     });
-    doc.y = rowY + 10;
+    doc.fillColor(labelColor).font("Helvetica").fontSize(10).text(`Invoice Date: ${dateStr}`, left + pageWidth - 160, 84, {
+      width: 142,
+      align: "right",
+    });
+    doc.text(`Order ID: ${order._id}`, left + pageWidth - 160, 100, {
+      width: 142,
+      align: "right",
+    });
 
-    doc.font("Helvetica-Bold").text("Tax Summary", { continued: false });
-    doc.font("Helvetica");
-    doc.text(`CGST: ₹${invoiceData.cgst.toFixed(2)}`);
-    doc.text(`SGST: ₹${invoiceData.sgst.toFixed(2)}`);
-    doc.text(`IGST: ₹${invoiceData.igst.toFixed(2)}`);
-    doc.moveDown(0.5);
+    const sectionTop = 156;
+    const cardWidth = (pageWidth - cardGap) / 2;
+    const cardHeight = 126;
+    const supplierContentWidth = cardWidth - 32;
+    doc.roundedRect(left, sectionTop, cardWidth, cardHeight, 10).fillAndStroke("#ffffff", border);
+    doc.roundedRect(left + cardWidth + cardGap, sectionTop, cardWidth, cardHeight, 10).fillAndStroke("#ffffff", border);
 
-    doc.font("Helvetica-Bold").text("Invoice Total", { continued: false });
-    doc.font("Helvetica");
-    doc.text(`Taxable Amount: ₹${invoiceData.subtotal.toFixed(2)}`);
-    doc.text(`Total GST: ₹${invoiceData.totalGst.toFixed(2)}`);
-    doc.text(`Shipping Charges: ₹${invoiceData.shippingCharge.toFixed(2)}`);
-    doc.font("Helvetica-Bold").text(`Grand Total: ₹${invoiceData.grandTotal.toFixed(2)}`);
-    doc.moveDown(0.5);
+    doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Supplier Details", left + 16, sectionTop + 14);
+    doc.fillColor(dark).font("Helvetica-Bold").fontSize(10).text(SUPPLIER.name, left + 16, sectionTop + 32, {
+      width: supplierContentWidth,
+    });
+    doc.fillColor("#334155").font("Helvetica").fontSize(9);
+    SUPPLIER.address.forEach((line, index) => {
+      doc.text(line, left + 16, sectionTop + 48 + index * 12, { width: supplierContentWidth });
+    });
+    doc.text(`Phone: ${SUPPLIER.phone}`, left + 16, sectionTop + 88, { width: supplierContentWidth });
+    doc.text(`Email: ${SUPPLIER.email}`, left + 16, sectionTop + 100, { width: supplierContentWidth });
+    doc.text(`GSTIN: ${SUPPLIER.gstin}`, left + 16, sectionTop + 112, { width: supplierContentWidth });
 
-    doc.font("Helvetica").text("Amount in Words:", { continued: false });
-    doc.font("Helvetica-Oblique").text(amountToWords(invoiceData.grandTotal), { width: 450 });
-    doc.moveDown(0.5);
+    doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Invoice Details", left + cardWidth + cardGap + 16, sectionTop + 14);
+    const detailX = left + cardWidth + cardGap + 16;
+    const valueX = detailX + 98;
+    const valueWidth = cardWidth - 98 - 16;
+    const orderIdStr = String(order._id);
+    const orderIdDisplay = orderIdStr.length > 20 ? orderIdStr.slice(0, 20) + "…" : orderIdStr;
+    const detailRows = [
+      ["Invoice No", invoiceNumber],
+      ["Invoice Date", dateStr],
+      ["Order ID", orderIdDisplay],
+      ["Place of Supply", String(invoiceData.placeOfSupply || "—").slice(0, 28)],
+      ["Payment Mode", "Prepaid"],
+    ];
+    detailRows.forEach(([label, value], index) => {
+      const y = sectionTop + 40 + index * 17;
+      doc.fillColor(labelColor).font("Helvetica").fontSize(9).text(label, detailX, y, { width: 90 });
+      doc.fillColor(dark).font("Helvetica-Bold").fontSize(9).text(value, valueX, y, {
+        width: valueWidth,
+      });
+    });
 
-    doc.font("Helvetica").text(
+    const billTop = sectionTop + cardHeight + 18;
+    doc.roundedRect(left, billTop, pageWidth, 88, 10).fillAndStroke("#ffffff", border);
+    doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Bill To", left + 16, billTop + 14);
+    doc.fillColor(dark).font("Helvetica-Bold").fontSize(11).text(order.contactDetails.name, left + 16, billTop + 34);
+    doc.fillColor("#334155").font("Helvetica").fontSize(9.5);
+    doc.text(order.address.street, left + 16, billTop + 51, { width: 250 });
+    doc.text(`${order.address.city}, ${order.address.state} – ${order.address.zipCode}`, left + 16, billTop + 65, {
+      width: 250,
+    });
+    doc.text(order.contactDetails.phone, rightColX, billTop + 34, { width: 160 });
+    doc.text(order.contactDetails.email, rightColX, billTop + 51, { width: 190 });
+
+    const tableTop = billTop + 112;
+    doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Product Details", left, tableTop - 20);
+    // Column layout: x and width for each column so they fit in pageWidth and align correctly
+    const tablePadding = 8;
+    const totalTableContent = pageWidth - tablePadding * 2;
+    const fixedColWidths = [24, 36, 24, 42, 46, 32, 46, 50]; // S.No, HSN, Qty, Rate, Taxable, GST%, GST Amt, Total
+    const descWidth = totalTableContent - fixedColWidths.reduce((a, b) => a + b, 0) - 24; // 24 = S.No already
+    const colWidths = [24, descWidth, ...fixedColWidths.slice(1)];
+    const colAligns = ["left", "left", "left", "right", "right", "right", "right", "right", "right"];
+    const cols = colWidths.map((w, i) => ({ x: 0, w, align: colAligns[i] }));
+    let cx = left + tablePadding;
+    cols.forEach((c, i) => {
+      cols[i].x = cx;
+      cx += c.w;
+    });
+    const headers = ["S.No", "Description", "HSN", "Qty", "Rate", "Taxable", "GST%", "GST Amt", "Total"];
+    const rowHeight = 22;
+    doc.roundedRect(left, tableTop, pageWidth, rowHeight, 6).fill(accent);
+    doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(8.5);
+    headers.forEach((h, i) => {
+      const c = cols[i];
+      doc.text(h, c.x, tableTop + 7, { width: c.w, align: c.align || "left" });
+    });
+
+    let rowY = tableTop + rowHeight;
+    doc.font("Helvetica").fontSize(8.5);
+    invoiceData.lines.forEach((row, index) => {
+      doc.rect(left, rowY, pageWidth, rowHeight).fill(index % 2 === 0 ? soft : "#ffffff");
+      doc.fillColor(dark);
+      const cellY = rowY + 7;
+      doc.text(String(row.sno), cols[0].x, cellY, { width: cols[0].w });
+      doc.text(String(row.description || ""), cols[1].x, cellY, { width: cols[1].w - 4 });
+      doc.text(String(row.hsn || ""), cols[2].x, cellY, { width: cols[2].w });
+      doc.text(String(row.qty), cols[3].x, cellY, { width: cols[3].w, align: "right" });
+      doc.text(formatMoney(row.rate), cols[4].x, cellY, { width: cols[4].w, align: "right" });
+      doc.text(formatMoney(row.taxableValue), cols[5].x, cellY, { width: cols[5].w, align: "right" });
+      doc.text(`${row.gstPct}%`, cols[6].x, cellY, { width: cols[6].w, align: "right" });
+      doc.text(formatMoney(row.gstAmount), cols[7].x, cellY, { width: cols[7].w, align: "right" });
+      doc.text(formatMoney(row.total), cols[8].x, cellY, { width: cols[8].w, align: "right" });
+      rowY += rowHeight;
+    });
+    doc.roundedRect(left, tableTop, pageWidth, rowY - tableTop, 6).stroke(border);
+
+    const summaryTop = rowY + 18;
+    const leftBoxWidth = 240;
+    const rightBoxWidth = pageWidth - leftBoxWidth - cardGap;
+    doc.roundedRect(left, summaryTop, leftBoxWidth, 92, 10).fillAndStroke("#ffffff", border);
+    doc.roundedRect(left + leftBoxWidth + cardGap, summaryTop, rightBoxWidth, 126, 10).fillAndStroke("#ffffff", border);
+
+    doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Tax Summary", left + 16, summaryTop + 14);
+    doc.fillColor("#334155").font("Helvetica").fontSize(10);
+    doc.text(`CGST`, left + 16, summaryTop + 40);
+    doc.text(formatMoney(invoiceData.cgst), left + 140, summaryTop + 40, { width: 70, align: "right" });
+    doc.text(`SGST`, left + 16, summaryTop + 56);
+    doc.text(formatMoney(invoiceData.sgst), left + 140, summaryTop + 56, { width: 70, align: "right" });
+    doc.text(`IGST`, left + 16, summaryTop + 72);
+    doc.text(formatMoney(invoiceData.igst), left + 140, summaryTop + 72, { width: 70, align: "right" });
+
+    const totalsX = left + leftBoxWidth + cardGap + 16;
+    doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Invoice Total", totalsX, summaryTop + 14);
+    const totalRows = [
+      ["Taxable Amount", formatMoney(invoiceData.subtotal)],
+      ["Total GST", formatMoney(invoiceData.totalGst)],
+      ["Shipping Charges", formatMoney(invoiceData.shippingCharge)],
+    ];
+    totalRows.forEach(([label, value], index) => {
+      const y = summaryTop + 40 + index * 18;
+      doc.fillColor(labelColor).font("Helvetica").fontSize(10).text(label, totalsX, y);
+      doc.fillColor(dark).font("Helvetica-Bold").text(value, totalsX + 160, y, {
+        width: rightBoxWidth - 40 - 160,
+        align: "right",
+      });
+    });
+    doc.moveTo(totalsX, summaryTop + 95).lineTo(left + pageWidth - 16, summaryTop + 95).strokeColor(border).stroke();
+    doc.fillColor(accent).font("Helvetica-Bold").fontSize(12).text("Grand Total", totalsX, summaryTop + 104);
+    doc.text(formatMoney(invoiceData.grandTotal), totalsX + 160, summaryTop + 104, {
+      width: rightBoxWidth - 40 - 160,
+      align: "right",
+    });
+
+    // Keep Declaration block (Amount in Words + Declaration footer) together on one page
+    const wordsBoxHeight = 58;
+    const wordsToFooterGap = 18;
+    const footerBoxHeight = 96;
+    const declarationBlockHeight = wordsBoxHeight + wordsToFooterGap + footerBoxHeight;
+    const pageBottom = doc.page.height - doc.page.margins.bottom;
+    let wordsTop;
+    let footerTop;
+    if (summaryTop + 142 + declarationBlockHeight > pageBottom) {
+      doc.addPage({ size: "A4", margin: 50 });
+      wordsTop = doc.page.margins.top;
+      footerTop = wordsTop + wordsBoxHeight + wordsToFooterGap;
+    } else {
+      wordsTop = summaryTop + 142;
+      footerTop = wordsTop + wordsBoxHeight + wordsToFooterGap;
+    }
+
+    doc.roundedRect(left, wordsTop, pageWidth, wordsBoxHeight, 10).fillAndStroke("#ffffff", border);
+    doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Amount in Words", left + 16, wordsTop + 14);
+    doc.fillColor(dark).font("Helvetica-Oblique").fontSize(10)
+      .text(amountToWords(invoiceData.grandTotal), left + 16, wordsTop + 32, { width: pageWidth - 32 });
+
+    doc.roundedRect(left, footerTop, pageWidth, footerBoxHeight, 10).fillAndStroke("#ffffff", border);
+    doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Declaration", left + 16, footerTop + 14);
+    doc.fillColor("#334155").font("Helvetica").fontSize(9.5).text(
       "We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct.",
-      { width: 500 }
+      left + 16,
+      footerTop + 34,
+      { width: 340 }
     );
-    doc.moveDown(0.5);
-    doc.font("Helvetica-Bold").text("Authorized Signatory");
-    doc.font("Helvetica").text("For I Jack Paper Products");
+    doc.fillColor(labelColor).font("Helvetica").fontSize(9).text("For I Jack Paper Products", left + pageWidth - 170, footerTop + 28, {
+      width: 150,
+      align: "right",
+    });
+    doc.moveTo(left + pageWidth - 165, footerTop + 62).lineTo(left + pageWidth - 20, footerTop + 62).strokeColor(border).stroke();
+    doc.fillColor(dark).font("Helvetica-Bold").fontSize(9.5).text("Authorized Signatory", left + pageWidth - 170, footerTop + 68, {
+      width: 150,
+      align: "right",
+    });
 
     doc.end();
   });
@@ -279,7 +392,11 @@ async function buildInvoicePdf(order, invoiceNumber, invoiceData) {
  */
 async function sendInvoiceEmail(toEmail, customerName, invoiceNumber, pdfBuffer) {
   const apiKey = process.env.RESEND_API_KEY;
-  const fromEmail = process.env.INVOICE_FROM_EMAIL || "I Jack Paper Products <notebookijack@gmail.com>";
+  const configuredFromEmail = process.env.INVOICE_FROM_EMAIL;
+  const fromEmail =
+    configuredFromEmail && !configuredFromEmail.toLowerCase().includes("gmail.com")
+      ? configuredFromEmail
+      : "I Jack Paper Products <onboarding@resend.dev>";
 
   if (!apiKey) {
     throw new Error("RESEND_API_KEY is not set");
@@ -297,10 +414,11 @@ async function sendInvoiceEmail(toEmail, customerName, invoiceNumber, pdfBuffer)
       <p>If you have any questions, contact us at ${SUPPLIER.email} or ${SUPPLIER.phone}.</p>
       <p>— I Jack Paper Products</p>
     `,
+    replyTo: SUPPLIER.email,
     attachments: [
       {
         filename: `Invoice-${invoiceNumber}.pdf`,
-        content: pdfBuffer,
+        content: pdfBuffer.toString("base64"),
       },
     ],
   });
@@ -337,6 +455,126 @@ async function buildInvoicePdfFromSnapshot(orderSnapshot, invoiceNumber, invoice
   return buildInvoicePdf(orderLike, invoiceNumber, invoiceData);
 }
 
+async function buildPdfForInvoiceRecord(invoice) {
+  const { orderSnapshot, invoiceData } = invoice.invoiceSnapshot;
+  return buildInvoicePdfFromSnapshot(
+    orderSnapshot,
+    invoice.invoiceNumber,
+    invoiceData
+  );
+}
+
+async function ensureInvoiceStored(invoice) {
+  if (!invoice.pdfPath) {
+    try {
+      const pdfBuffer = await buildPdfForInvoiceRecord(invoice);
+      const pdfPath = await uploadInvoiceToSupabase(
+        pdfBuffer,
+        `${invoice.invoiceNumber}.pdf`
+      );
+      invoice.pdfPath = pdfPath;
+      invoice.lastStorageError = null;
+      await invoice.save();
+      return pdfPath;
+    } catch (error) {
+      invoice.lastStorageError = error.message || "Storage upload failed";
+      await invoice.save();
+      throw error;
+    }
+  }
+
+  try {
+    await getInvoiceSignedUrl(invoice.pdfPath);
+    return invoice.pdfPath;
+  } catch (error) {
+    if (!/Object not found/i.test(error.message || "")) {
+      throw error;
+    }
+
+    try {
+      const pdfBuffer = await buildPdfForInvoiceRecord(invoice);
+      const pdfPath = await uploadInvoiceToSupabase(
+        pdfBuffer,
+        `${invoice.invoiceNumber}.pdf`
+      );
+      invoice.pdfPath = pdfPath;
+      invoice.lastStorageError = null;
+      await invoice.save();
+      return pdfPath;
+    } catch (uploadError) {
+      invoice.lastStorageError = uploadError.message || "Storage upload failed";
+      await invoice.save();
+      throw uploadError;
+    }
+  }
+}
+
+async function createInvoiceRecordForOrder(order) {
+  const invoiceNumber = order.invoiceNumber || await getNextInvoiceNumber(order.createdAt);
+  const invoiceData = await buildInvoiceData(order);
+  const pdfBuffer = await buildInvoicePdf(order, invoiceNumber, invoiceData);
+
+  const orderSnapshot = {
+    _id: order._id,
+    contactDetails: order.contactDetails,
+    address: order.address,
+    createdAt: order.createdAt,
+  };
+
+  const invoiceDoc = await Invoice.create({
+    orderId: order._id,
+    invoiceNumber,
+    customerEmail: order.contactDetails.email,
+    customerName: order.contactDetails.name,
+    pdfPath: null,
+    invoiceSnapshot: { orderSnapshot, invoiceData },
+  });
+
+  await Order.findByIdAndUpdate(order._id, { invoiceNumber });
+
+  if (supabase) {
+    try {
+      const pdfPath = await uploadInvoiceToSupabase(
+        pdfBuffer,
+        `${invoiceNumber}.pdf`
+      );
+      await Invoice.findByIdAndUpdate(invoiceDoc._id, {
+        pdfPath,
+        lastStorageError: null,
+      });
+    } catch (err) {
+      await Invoice.findByIdAndUpdate(invoiceDoc._id, {
+        lastStorageError: err.message || "Upload failed",
+      });
+      console.error("Invoice: Supabase upload failed", err);
+    }
+  } else {
+    await Invoice.findByIdAndUpdate(invoiceDoc._id, {
+      lastStorageError: "Supabase not configured",
+    });
+  }
+
+  return {
+    invoiceDoc,
+    pdfBuffer,
+    invoiceNumber,
+  };
+}
+
+async function ensureInvoiceRecordForOrder(orderId) {
+  let existing = await Invoice.findOne({ orderId });
+  if (existing) return existing;
+
+  const order = await Order.findById(orderId).populate("items.notebook").lean();
+  if (!order || order.payment.paymentStatus !== "SUCCESS") {
+    return null;
+  }
+
+  const { invoiceDoc } = await createInvoiceRecordForOrder(order);
+  existing = await Invoice.findById(invoiceDoc._id);
+  return existing;
+}
+
 /**
  * Generate invoice number, PDF, upload to Supabase, save Invoice in MongoDB, send email.
  */
@@ -356,42 +594,25 @@ async function generateAndSendInvoice(orderId) {
     return;
   }
 
-  const invoiceNumber = await getNextInvoiceNumber(order.createdAt);
-  const invoiceData = await buildInvoiceData(order);
-  const pdfBuffer = await buildInvoicePdf(order, invoiceNumber, invoiceData);
+  const { invoiceDoc, pdfBuffer, invoiceNumber } = await createInvoiceRecordForOrder(order);
 
-  const fileName = `${invoiceNumber}.pdf`;
-  let pdfPath = fileName;
-  if (supabase) {
-    try {
-      pdfPath = await uploadInvoiceToSupabase(pdfBuffer, fileName);
-    } catch (err) {
-      console.error("Invoice: Supabase upload failed", err);
-    }
+  try {
+    await sendInvoiceEmail(
+      order.contactDetails.email,
+      order.contactDetails.name,
+      invoiceNumber,
+      pdfBuffer
+    );
+    await Invoice.findByIdAndUpdate(invoiceDoc._id, {
+      lastEmailSentAt: new Date(),
+      lastEmailError: null,
+    });
+  } catch (err) {
+    await Invoice.findByIdAndUpdate(invoiceDoc._id, {
+      lastEmailError: err.message || "Send failed",
+    });
+    console.error("Invoice email send failed:", err);
   }
-
-  const orderSnapshot = {
-    _id: order._id,
-    contactDetails: order.contactDetails,
-    address: order.address,
-    createdAt: order.createdAt,
-  };
-  await Invoice.create({
-    orderId: order._id,
-    invoiceNumber,
-    customerEmail: order.contactDetails.email,
-    customerName: order.contactDetails.name,
-    pdfPath,
-    invoiceSnapshot: { orderSnapshot, invoiceData },
-  });
-
-  await Order.findByIdAndUpdate(orderId, { invoiceNumber });
-  await sendInvoiceEmail(
-    order.contactDetails.email,
-    order.contactDetails.name,
-    invoiceNumber,
-    pdfBuffer
-  );
 }
 
 /**
@@ -414,6 +635,8 @@ module.exports = {
   buildInvoicePdfFromSnapshot,
   sendInvoiceEmail,
   generateAndSendInvoice,
+  ensureInvoiceRecordForOrder,
   uploadInvoiceToSupabase,
   getInvoiceSignedUrl,
+  ensureInvoiceStored,
 };

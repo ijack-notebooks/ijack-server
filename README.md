@@ -89,6 +89,8 @@ BACKEND_URL=https://your-backend-url.com
 - Invoice PDFs are stored in Supabase Storage bucket **Invoices**; invoice data is stored in MongoDB (**Invoice** collection) so invoices can be regenerated or resent.
 - **Create the Invoices bucket:** run `npm run create-invoices-bucket` or run `supabase-invoices-bucket.sql` in the Supabase SQL Editor.
 - Admin **Invoices** (sidebar) lists all invoices with **View** (opens PDF from Supabase) and **Send** (resend email to customer).
+- If invoice upload fails with a Supabase RLS error, run `supabase-invoices-bucket.sql` to add the required storage policies for the `Invoices` bucket.
+- Do not use a plain `gmail.com` sender with Resend. Set `INVOICE_FROM_EMAIL` to a verified sender, or use `onboarding@resend.dev` for testing.
 
 ### Supabase Integration (PostgreSQL for Financial Data & Storage)
 - Orders are automatically synced to Supabase PostgreSQL database for financial reporting and analytics

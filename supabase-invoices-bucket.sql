@@ -10,17 +10,30 @@ INSERT INTO storage.buckets (id, name, public)
 VALUES ('Invoices', 'Invoices', false)
 ON CONFLICT (id) DO NOTHING;
 
--- Allow service role / authenticated backend to upload and read
--- Policy: Allow insert for authenticated (backend uses service role)
-CREATE POLICY "Service role can upload invoices"
+-- Allow backend access to upload/read/update invoice PDFs.
+-- Run these if your uploads fail with:
+-- "new row violates row-level security policy"
+DROP POLICY IF EXISTS "Service role can upload invoices" ON storage.objects;
+DROP POLICY IF EXISTS "Service role can read invoices" ON storage.objects;
+DROP POLICY IF EXISTS "Authenticated can upload invoices" ON storage.objects;
+DROP POLICY IF EXISTS "Authenticated can read invoices" ON storage.objects;
+DROP POLICY IF EXISTS "Authenticated can update invoices" ON storage.objects;
+
+CREATE POLICY "Anon and authenticated can upload invoices"
 ON storage.objects FOR INSERT
-TO service_role
+TO anon, authenticated, service_role
 WITH CHECK (bucket_id = 'Invoices');
 
-CREATE POLICY "Service role can read invoices"
+CREATE POLICY "Anon and authenticated can read invoices"
 ON storage.objects FOR SELECT
-TO service_role
+TO anon, authenticated, service_role
 USING (bucket_id = 'Invoices');
+
+CREATE POLICY "Anon and authenticated can update invoices"
+ON storage.objects FOR UPDATE
+TO anon, authenticated, service_role
+USING (bucket_id = 'Invoices')
+WITH CHECK (bucket_id = 'Invoices');
 
 -- Optional: allow authenticated users with role 'admin' to read (if you use custom auth)
 -- CREATE POLICY "Admins can read invoices"

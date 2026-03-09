@@ -12,6 +12,8 @@ const {
   getInvoiceSignedUrl,
   buildInvoicePdfFromSnapshot,
   sendInvoiceEmail,
+  ensureInvoiceStored,
+  ensureInvoiceRecordForOrder,
 } = require("../utils/invoice");
 const upload = require("../middleware/upload");
 const { updateOrderInSupabase } = require("../utils/supabaseOrders");
@@ -584,6 +586,22 @@ router.post("/cleanup-images", adminAuth, async (req, res) => {
 // List all invoices (admin) – exclude heavy invoiceSnapshot
 router.get("/invoices", adminAuth, async (req, res) => {
   try {
+    const successfulOrders = await Order.find({
+      "payment.paymentStatus": "SUCCESS",
+    }).select("_id");
+    const existingInvoices = await Invoice.find().select("orderId").lean();
+    const existingOrderIds = new Set(
+      existingInvoices.map((inv) => String(inv.orderId))
+    );
+
+    for (const order of successfulOrders) {
+      if (!existingOrderIds.has(String(order._id))) {
+        await ensureInvoiceRecordForOrder(order._id).catch((err) =>
+          console.error("Invoice backfill failed:", err)
+        );
+      }
+    }
+
     const invoices = await Invoice.find()
       .select("-invoiceSnapshot")
       .sort({ createdAt: -1 })
@@ -599,10 +617,15 @@ router.get("/invoices/:id/view", adminAuth, async (req, res) => {
   try {
     const invoice = await Invoice.findById(req.params.id);
     if (!invoice) return res.status(404).json({ message: "Invoice not found" });
-    const url = await getInvoiceSignedUrl(invoice.pdfPath);
+    const pdfPath = await ensureInvoiceStored(invoice);
+    const url = await getInvoiceSignedUrl(pdfPath);
     res.json({ url });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    const message =
+      error.message && error.message.includes("row-level security policy")
+        ? "Invoice PDF is not stored in Supabase yet because Storage access is blocked. Fix the Invoices bucket policy or use a real Supabase service-role key, then try View again."
+        : error.message;
+    res.status(500).json({ message });
   }
 });
 
@@ -623,8 +646,15 @@ router.post("/invoices/:id/send", adminAuth, async (req, res) => {
       invoice.invoiceNumber,
       pdfBuffer
     );
+    await Invoice.findByIdAndUpdate(invoice._id, {
+      lastEmailSentAt: new Date(),
+      lastEmailError: null,
+    });
     res.json({ success: true, message: "Invoice sent to " + invoice.customerEmail });
   } catch (error) {
+    await Invoice.findByIdAndUpdate(req.params.id, {
+      lastEmailError: error.message || "Send failed",
+    }).catch(() => {});
     res.status(500).json({ message: error.message });
   }
 });
