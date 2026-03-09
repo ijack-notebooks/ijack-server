@@ -99,6 +99,15 @@ const OrderSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
+  promoCode: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "PromoCode",
+    default: null,
+  },
+  discountAmount: {
+    type: Number,
+    default: 0,
+  },
   shiprocket: {
     orderId: { type: Number },
     shipmentId: { type: Number },

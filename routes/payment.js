@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const Order = require("../models/Order");
 const Notebook = require("../models/Notebook");
 const Category = require("../models/Category");
+const PromoCode = require("../models/PromoCode");
 const { auth } = require("../middleware/auth");
 const { storeOrderInSupabase, updateOrderInSupabase } = require("../utils/supabaseOrders");
 const { generateAndSendInvoice } = require("../utils/invoice");
@@ -93,13 +94,43 @@ router.post("/initiate", auth, async (req, res) => {
     }
 
     const shippingCharge = Math.ceil(totalWeightGrams / 500) * 26;
-    const totalAmount = Math.round(subtotal + shippingCharge + gstAmount);
+    const preDiscountTotal = Math.round(subtotal + shippingCharge + gstAmount);
+    let totalAmount = preDiscountTotal;
+    let discountAmount = 0;
+    let promoCodeId = null;
+
+    const rawPromoCode = req.body.promoCode;
+    if (rawPromoCode && String(rawPromoCode).trim()) {
+      const promo = await PromoCode.findOne({
+        code: String(rawPromoCode).trim().toUpperCase(),
+        active: true,
+      });
+      if (promo) {
+        const now = new Date();
+        const validFromOk = !promo.validFrom || new Date(promo.validFrom) <= now;
+        const validUntilOk = !promo.validUntil || new Date(promo.validUntil) >= now;
+        const minOrderOk = !promo.minOrderAmount || preDiscountTotal >= promo.minOrderAmount;
+        const usesOk = promo.maxUses == null || (promo.usedCount || 0) < promo.maxUses;
+        if (validFromOk && validUntilOk && minOrderOk && usesOk) {
+          if (promo.type === "percent") {
+            discountAmount = Math.round((preDiscountTotal * Math.min(100, Math.max(0, promo.value))) / 100);
+          } else {
+            discountAmount = Math.min(Number(promo.value) || 0, preDiscountTotal);
+          }
+          totalAmount = Math.max(0, preDiscountTotal - discountAmount);
+          promoCodeId = promo._id;
+        }
+      }
+    }
+
     const merchantOrderId = generateMerchantOrderId();
 
     const order = new Order({
       user: req.user._id,
       items: orderItems,
       totalAmount,
+      discountAmount,
+      promoCode: promoCodeId,
       contactDetails,
       address,
       status: "pending",
@@ -229,6 +260,9 @@ router.get("/status/:merchantOrderId", auth, async (req, res) => {
           }
 
           await order.save();
+          if (order.promoCode) {
+            await PromoCode.findByIdAndUpdate(order.promoCode, { $inc: { usedCount: 1 } });
+          }
           updateOrderInSupabase(order._id.toString(), {
             status: order.status,
             payment: order.payment,
@@ -312,6 +346,9 @@ router.post("/webhook", async (req, res) => {
       }
 
       await order.save();
+      if (order.promoCode) {
+        await PromoCode.findByIdAndUpdate(order.promoCode, { $inc: { usedCount: 1 } });
+      }
       updateOrderInSupabase(order._id.toString(), {
         status: order.status,
         payment: order.payment,

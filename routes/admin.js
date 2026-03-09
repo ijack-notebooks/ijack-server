@@ -7,6 +7,7 @@ const User = require("../models/User");
 const Notebook = require("../models/Notebook");
 const Category = require("../models/Category");
 const Invoice = require("../models/Invoice");
+const PromoCode = require("../models/PromoCode");
 const { adminAuth } = require("../middleware/adminAuth");
 const {
   getInvoiceSignedUrl,
@@ -655,6 +656,85 @@ router.post("/invoices/:id/send", adminAuth, async (req, res) => {
     await Invoice.findByIdAndUpdate(req.params.id, {
       lastEmailError: error.message || "Send failed",
     }).catch(() => {});
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ——— Promo codes (admin) ———
+router.get("/promo-codes", adminAuth, async (req, res) => {
+  try {
+    const codes = await PromoCode.find().sort({ createdAt: -1 }).lean();
+    res.json(codes);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.post("/promo-codes", adminAuth, async (req, res) => {
+  try {
+    const {
+      code,
+      type,
+      value,
+      minOrderAmount,
+      validFrom,
+      validUntil,
+      maxUses,
+    } = req.body;
+    if (!code || !type || value == null) {
+      return res.status(400).json({
+        message: "code, type (percent|fixed), and value are required",
+      });
+    }
+    if (!["percent", "fixed"].includes(type)) {
+      return res.status(400).json({ message: "type must be percent or fixed" });
+    }
+    if (type === "percent" && (value < 0 || value > 100)) {
+      return res.status(400).json({ message: "percent value must be 0–100" });
+    }
+    const doc = await PromoCode.create({
+      code: String(code).trim().toUpperCase(),
+      type,
+      value: Number(value),
+      minOrderAmount: minOrderAmount != null ? Number(minOrderAmount) : 0,
+      validFrom: validFrom ? new Date(validFrom) : undefined,
+      validUntil: validUntil ? new Date(validUntil) : null,
+      maxUses: maxUses != null && maxUses !== "" ? Number(maxUses) : null,
+    });
+    res.status(201).json(doc);
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ message: "A promo code with this code already exists" });
+    }
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.patch("/promo-codes/:id", adminAuth, async (req, res) => {
+  try {
+    const { active, maxUses, validUntil } = req.body;
+    const update = {};
+    if (typeof active === "boolean") update.active = active;
+    if (maxUses !== undefined) update.maxUses = maxUses === "" ? null : Number(maxUses);
+    if (validUntil !== undefined) update.validUntil = validUntil ? new Date(validUntil) : null;
+    const doc = await PromoCode.findByIdAndUpdate(
+      req.params.id,
+      { $set: update },
+      { new: true }
+    );
+    if (!doc) return res.status(404).json({ message: "Promo code not found" });
+    res.json(doc);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.delete("/promo-codes/:id", adminAuth, async (req, res) => {
+  try {
+    const doc = await PromoCode.findByIdAndDelete(req.params.id);
+    if (!doc) return res.status(404).json({ message: "Promo code not found" });
+    res.json({ message: "Promo code deleted" });
+  } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
