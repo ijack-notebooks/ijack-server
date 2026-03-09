@@ -49,7 +49,7 @@ async function storeOrderInSupabase(orderData) {
         address_country: orderData.address?.country || null,
         // Payment details
         payment_merchant_order_id: orderData.payment?.merchantOrderId || null,
-        payment_transaction_id: orderData.payment?.phonepeTransactionId || null,
+        payment_transaction_id: orderData.payment?.paymentTransactionId || orderData.payment?.phonepeTransactionId || null,
         payment_status: orderData.payment?.paymentStatus || "PENDING",
         payment_method: orderData.payment?.paymentMethod || "ONLINE",
         payment_amount: orderData.payment?.amount || orderData.totalAmount,
@@ -111,7 +111,9 @@ async function updateOrderInSupabase(mongodbOrderId, updateData) {
       if (updateData.payment.paymentStatus) {
         updatePayload.payment_status = updateData.payment.paymentStatus;
       }
-      if (updateData.payment.phonepeTransactionId) {
+      if (updateData.payment.paymentTransactionId) {
+        updatePayload.payment_transaction_id = updateData.payment.paymentTransactionId;
+      } else if (updateData.payment.phonepeTransactionId) {
         updatePayload.payment_transaction_id = updateData.payment.phonepeTransactionId;
       }
       if (updateData.payment.paymentMethod) {

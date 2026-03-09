@@ -65,6 +65,7 @@ router.get("/orders", adminAuth, async (req, res) => {
       },
       payment: {
         merchantOrderId: order.payment_merchant_order_id,
+        paymentTransactionId: order.payment_transaction_id,
         phonepeTransactionId: order.payment_transaction_id,
         paymentStatus: order.payment_status,
         paymentMethod: order.payment_method,
@@ -203,6 +204,7 @@ router.get("/orders/:mongodbOrderId", adminAuth, async (req, res) => {
       },
       payment: {
         merchantOrderId: orderData.payment_merchant_order_id,
+        paymentTransactionId: orderData.payment_transaction_id,
         phonepeTransactionId: orderData.payment_transaction_id,
         paymentStatus: orderData.payment_status,
         paymentMethod: orderData.payment_method,

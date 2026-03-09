@@ -74,6 +74,12 @@ const OrderSchema = new mongoose.Schema({
       type: String,
       unique: true,
     },
+    zwitchPaymentTokenId: {
+      type: String,
+    },
+    paymentTransactionId: {
+      type: String,
+    },
     phonepeTransactionId: {
       type: String,
     },
@@ -88,6 +94,10 @@ const OrderSchema = new mongoose.Schema({
     amount: {
       type: Number,
     },
+  },
+  invoiceNumber: {
+    type: String,
+    default: null,
   },
   shiprocket: {
     orderId: { type: Number },

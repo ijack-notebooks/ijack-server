@@ -6,7 +6,13 @@ const Order = require("../models/Order");
 const User = require("../models/User");
 const Notebook = require("../models/Notebook");
 const Category = require("../models/Category");
+const Invoice = require("../models/Invoice");
 const { adminAuth } = require("../middleware/adminAuth");
+const {
+  getInvoiceSignedUrl,
+  buildInvoicePdfFromSnapshot,
+  sendInvoiceEmail,
+} = require("../utils/invoice");
 const upload = require("../middleware/upload");
 const { updateOrderInSupabase } = require("../utils/supabaseOrders");
 const {
@@ -570,6 +576,54 @@ router.post("/cleanup-images", adminAuth, async (req, res) => {
       message: "Cleanup completed successfully",
       deletedCount,
     });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// List all invoices (admin) – exclude heavy invoiceSnapshot
+router.get("/invoices", adminAuth, async (req, res) => {
+  try {
+    const invoices = await Invoice.find()
+      .select("-invoiceSnapshot")
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json(invoices);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get signed URL to view invoice PDF (admin)
+router.get("/invoices/:id/view", adminAuth, async (req, res) => {
+  try {
+    const invoice = await Invoice.findById(req.params.id);
+    if (!invoice) return res.status(404).json({ message: "Invoice not found" });
+    const url = await getInvoiceSignedUrl(invoice.pdfPath);
+    res.json({ url });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Resend invoice email to customer (admin)
+router.post("/invoices/:id/send", adminAuth, async (req, res) => {
+  try {
+    const invoice = await Invoice.findById(req.params.id);
+    if (!invoice) return res.status(404).json({ message: "Invoice not found" });
+    const { orderSnapshot, invoiceData } = invoice.invoiceSnapshot;
+    const pdfBuffer = await buildInvoicePdfFromSnapshot(
+      orderSnapshot,
+      invoice.invoiceNumber,
+      invoiceData
+    );
+    await sendInvoiceEmail(
+      invoice.customerEmail,
+      invoice.customerName,
+      invoice.invoiceNumber,
+      pdfBuffer
+    );
+    res.json({ success: true, message: "Invoice sent to " + invoice.customerEmail });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

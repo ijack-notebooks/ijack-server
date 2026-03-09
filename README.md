@@ -61,32 +61,34 @@ The server will run on `http://localhost:5002` (or the port specified in `.env`)
 - `GET /api/orders/my-orders` - Get user's orders (requires auth)
 - `GET /api/orders/:id` - Get single order (requires auth)
 
-### Payment (PhonePe Integration)
-- `POST /api/payment/initiate` - Initiate payment and create order (requires auth)
-  - Creates an order in the database and initiates PhonePe payment
-  - Returns `redirectUrl` to redirect user to PhonePe checkout page
+### Payment (ZWITCH Layer Integration)
+- `POST /api/payment/initiate` - Create order and get ZWITCH payment token (requires auth)
+  - Creates an order in the database and calls ZWITCH Create Payment Token API
+  - Returns `paymentToken`, `accessKey`, and `layerScriptUrl` for Layer.js checkout (no redirect)
 - `GET /api/payment/status/:merchantOrderId` - Check payment status (requires auth)
-  - Checks payment status with PhonePe API
-  - Updates order status and stock quantities if payment is successful
-- `POST /api/payment/webhook` - PhonePe webhook handler (no auth required)
-  - Receives payment callbacks from PhonePe
-  - Updates order status and stock quantities automatically
+  - Polls ZWITCH status API and updates order status and stock if payment is successful
+- `POST /api/payment/webhook` - ZWITCH webhook handler (no auth required)
+  - Receives payment events (e.g. payment_token_paid, payment_captured)
+  - Verifies `x-zwitch-signature` and updates order status
 
-**PhonePe Configuration:**
+**ZWITCH Configuration:**
 Add the following to your `.env` file:
 ```env
-PHONEPE_MERCHANT_ID=your-merchant-id
-PHONEPE_SALT_KEY=your-salt-key
-PHONEPE_SALT_INDEX=1
-PHONEPE_CLIENT_ID=your-client-id
-PHONEPE_CLIENT_SECRET=your-client-secret
-PHONEPE_CLIENT_VERSION=1.0
-PHONEPE_ENVIRONMENT=SANDBOX  # or PRODUCTION for live payments
+ZWITCH_PG_ACCESS_KEY=your-pg-access-key
+ZWITCH_PG_SECRET_KEY=your-pg-secret-key
+ZWITCH_ENVIRONMENT=sandbox
+ZWITCH_WEBHOOK_SIGNING_SECRET=your-webhook-signing-secret
 FRONTEND_URL=https://your-frontend-url.com
 BACKEND_URL=https://your-backend-url.com
 ```
 
-**Note:** The integration uses PhonePe's Standard Checkout API v2. Make sure to configure the webhook URL in your PhonePe merchant dashboard.
+**Note:** Get PG API Keys from [ZWITCH Dashboard](https://dashboard.zwitch.io) → Developers → PG API Keys. Set the webhook URL in the Dashboard (e.g. `https://your-backend-url.com/api/payment/webhook`) and use the same Signing Secret in `ZWITCH_WEBHOOK_SIGNING_SECRET`.
+
+### GST Invoice & Email (Resend)
+- When a payment succeeds, a **GST-compliant tax invoice** is generated (PDFKit) and emailed to the customer via [Resend](https://resend.com).
+- Invoice PDFs are stored in Supabase Storage bucket **Invoices**; invoice data is stored in MongoDB (**Invoice** collection) so invoices can be regenerated or resent.
+- **Create the Invoices bucket:** run `npm run create-invoices-bucket` or run `supabase-invoices-bucket.sql` in the Supabase SQL Editor.
+- Admin **Invoices** (sidebar) lists all invoices with **View** (opens PDF from Supabase) and **Send** (resend email to customer).
 
 ### Supabase Integration (PostgreSQL for Financial Data & Storage)
 - Orders are automatically synced to Supabase PostgreSQL database for financial reporting and analytics

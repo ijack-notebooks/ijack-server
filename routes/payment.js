@@ -7,85 +7,49 @@ const Notebook = require("../models/Notebook");
 const Category = require("../models/Category");
 const { auth } = require("../middleware/auth");
 const { storeOrderInSupabase, updateOrderInSupabase } = require("../utils/supabaseOrders");
+const { generateAndSendInvoice } = require("../utils/invoice");
 
-// PhonePe Configuration
-const PHONEPE_MERCHANT_ID = process.env.PHONEPE_MERCHANT_ID;
-const PHONEPE_SALT_KEY = process.env.PHONEPE_SALT_KEY;
-const PHONEPE_SALT_INDEX = process.env.PHONEPE_SALT_INDEX || 1;
-const PHONEPE_CLIENT_ID = process.env.PHONEPE_CLIENT_ID;
-const PHONEPE_CLIENT_SECRET = process.env.PHONEPE_CLIENT_SECRET;
-const PHONEPE_CLIENT_VERSION = process.env.PHONEPE_CLIENT_VERSION || "1.0";
-const PHONEPE_ENV = process.env.PHONEPE_ENVIRONMENT || "SANDBOX"; // SANDBOX or PRODUCTION
+// ZWITCH Configuration (Layer Payment Gateway)
+// https://developers.zwitch.io/reference
+const ZWITCH_PG_ACCESS_KEY = process.env.ZWITCH_PG_ACCESS_KEY;
+const ZWITCH_PG_SECRET_KEY = process.env.ZWITCH_PG_SECRET_KEY;
+const ZWITCH_ENV = (process.env.ZWITCH_ENVIRONMENT || "sandbox").toLowerCase(); // sandbox | production
+const ZWITCH_WEBHOOK_SECRET = process.env.ZWITCH_WEBHOOK_SIGNING_SECRET;
 
-// PhonePe API URLs (based on official documentation)
-const PHONEPE_BASE_URL = PHONEPE_ENV === "PRODUCTION" 
-  ? "https://api.phonepe.com/apis/pg"
-  : "https://api-preprod.phonepe.com/apis/pg-sandbox";
+const ZWITCH_BASE = "https://api.zwitch.io";
+const ZWITCH_PG_PATH = ZWITCH_ENV === "production" ? "/v1/pg" : "/v1/pg/sandbox";
 
-const PHONEPE_AUTH_URL = PHONEPE_ENV === "PRODUCTION"
-  ? "https://api.phonepe.com/apis/identity-manager"
-  : "https://api-preprod.phonepe.com/apis/pg-sandbox";
-
-// Generate unique merchant order ID
+// Generate unique merchant order ID (used as mtx in ZWITCH)
 const generateMerchantOrderId = () => {
   return `ORDER_${Date.now()}_${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
 };
 
-// Generate X-VERIFY header for PhonePe (used for webhooks)
-const generateXVerify = (payload, endpoint) => {
-  const string = payload + endpoint + PHONEPE_SALT_KEY;
-  const sha256 = crypto.createHash("sha256").update(string).digest("hex");
-  return sha256 + "###" + PHONEPE_SALT_INDEX;
+const getZwitchAuthHeader = () => {
+  const credentials = `${ZWITCH_PG_ACCESS_KEY}:${ZWITCH_PG_SECRET_KEY}`;
+  return { Authorization: `Bearer ${credentials}` };
 };
 
-// Get PhonePe access token (OAuth 2.0 Client Credentials)
-let accessToken = null;
-let tokenExpiry = null;
-
-const getAccessToken = async () => {
+// Verify ZWITCH webhook signature (x-zwitch-signature); payload = normalized JSON string
+const verifyZwitchWebhookSignature = (normalizedPayload, signature) => {
+  if (!ZWITCH_WEBHOOK_SECRET || !signature) return false;
   try {
-    // Check if token is still valid
-    if (accessToken && tokenExpiry && Date.now() < tokenExpiry) {
-      return accessToken;
-    }
-
-    // PhonePe uses application/x-www-form-urlencoded for token request
-    const params = new URLSearchParams();
-    params.append("client_id", PHONEPE_CLIENT_ID);
-    params.append("client_version", PHONEPE_CLIENT_VERSION);
-    params.append("client_secret", PHONEPE_CLIENT_SECRET);
-    params.append("grant_type", "client_credentials");
-
-    const response = await axios.post(
-      `${PHONEPE_AUTH_URL}/v1/oauth/token`,
-      params.toString(),
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-      }
-    );
-
-    if (response.data && response.data.access_token) {
-      accessToken = response.data.access_token;
-      // Use expires_at from response (in seconds) or default to 50 minutes
-      const expiresAt = response.data.expires_at 
-        ? response.data.expires_at * 1000 // Convert to milliseconds
-        : Date.now() + 50 * 60 * 1000; // Default 50 minutes
-      tokenExpiry = expiresAt;
-      return accessToken;
-    }
-
-    throw new Error("Failed to get access token");
-  } catch (error) {
-    console.error("PhonePe auth error:", error.response?.data || error.message);
-    throw error;
+    const expected = crypto.createHmac("sha256", ZWITCH_WEBHOOK_SECRET).update(normalizedPayload).digest("hex");
+    return crypto.timingSafeEqual(Buffer.from(signature, "hex"), Buffer.from(expected, "hex"));
+  } catch (e) {
+    return false;
   }
 };
 
-// Create order and initiate payment
+// Create order and get ZWITCH payment token for Layer.js
 router.post("/initiate", auth, async (req, res) => {
   try {
+    if (!ZWITCH_PG_ACCESS_KEY || !ZWITCH_PG_SECRET_KEY) {
+      return res.status(503).json({
+        success: false,
+        message: "Payment gateway is not configured. Please set ZWITCH_PG_ACCESS_KEY and ZWITCH_PG_SECRET_KEY.",
+      });
+    }
+
     const { items, contactDetails, address } = req.body;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -96,13 +60,11 @@ router.post("/initiate", auth, async (req, res) => {
       return res.status(400).json({ message: "Contact details and address are required" });
     }
 
-    // Category name -> GST % (for GST calculation)
     const categoryDocs = await Category.find({}).select("name gstPercentage").lean();
     const gstByCategory = Object.fromEntries(
       categoryDocs.map((c) => [c.name, Number(c.gstPercentage) || 0])
     );
 
-    // Calculate subtotal, shipping, GST and total
     let subtotal = 0;
     let totalWeightGrams = 0;
     let gstAmount = 0;
@@ -113,7 +75,6 @@ router.post("/initiate", auth, async (req, res) => {
       if (!notebook) {
         return res.status(404).json({ message: `Notebook ${item.notebookId} not found` });
       }
-
       if (notebook.stockQuantity < item.quantity) {
         return res.status(400).json({ message: `Insufficient stock for ${notebook.name}` });
       }
@@ -131,15 +92,10 @@ router.post("/initiate", auth, async (req, res) => {
       });
     }
 
-    // Shipping: Rs 26 per 500 grams
     const shippingCharge = Math.ceil(totalWeightGrams / 500) * 26;
-
     const totalAmount = Math.round(subtotal + shippingCharge + gstAmount);
-
-    // Generate merchant order ID
     const merchantOrderId = generateMerchantOrderId();
 
-    // Create order with pending payment status
     const order = new Order({
       user: req.user._id,
       items: orderItems,
@@ -156,84 +112,71 @@ router.post("/initiate", auth, async (req, res) => {
 
     await order.save();
 
-    // Sync order to Supabase (async, don't wait)
-    // Populate order data for Supabase sync
     (async () => {
       try {
         const populatedOrder = await Order.populate(order, [
           { path: "user", select: "username email" },
-          { path: "items.notebook" }
+          { path: "items.notebook" },
         ]);
         await storeOrderInSupabase(populatedOrder);
       } catch (err) {
         console.error("Failed to sync order to Supabase:", err);
-        // Don't throw - allow payment to continue even if Supabase sync fails
       }
     })();
 
-    // Get access token
-    const token = await getAccessToken();
-
-    // Prepare PhonePe payment request (v2 API structure)
-    const redirectUrl = `${process.env.FRONTEND_URL || "https://ijack-web.onrender.com"}/payment/callback`;
-
-    const paymentRequest = {
-      merchantOrderId: merchantOrderId,
-      amount: Math.round(totalAmount * 100), // Amount in paise
-      paymentFlow: {
-        type: "PG_CHECKOUT",
-        merchantUrls: {
-          redirectUrl: redirectUrl,
-        },
-      },
+    // Create ZWITCH payment token for Layer.js
+    const tokenPayload = {
+      amount: totalAmount,
+      contact_number: contactDetails.phone || "",
+      email_id: contactDetails.email || "",
+      currency: "INR",
+      mtx: merchantOrderId,
     };
 
-    // Initiate payment with PhonePe (v2 API - no base64 encoding needed)
-    const endpoint = "/checkout/v2/pay";
-    const paymentResponse = await axios.post(
-      `${PHONEPE_BASE_URL}${endpoint}`,
-      paymentRequest,
+    const tokenResponse = await axios.post(
+      `${ZWITCH_BASE}${ZWITCH_PG_PATH}/payment_token`,
+      tokenPayload,
       {
         headers: {
           "Content-Type": "application/json",
-          Authorization: `O-Bearer ${token}`, // Note: O-Bearer (not Bearer)
+          ...getZwitchAuthHeader(),
         },
       }
     );
 
-    if (paymentResponse.data && paymentResponse.data.redirectUrl) {
-      // Update order with PhonePe order ID if available
-      if (paymentResponse.data.orderId) {
-        order.payment.phonepeTransactionId = paymentResponse.data.orderId;
-        await order.save();
-      }
-
-      res.json({
-        success: true,
-        orderId: order._id,
-        merchantOrderId: merchantOrderId,
-        redirectUrl: paymentResponse.data.redirectUrl,
-        paymentUrl: paymentResponse.data.redirectUrl,
-      });
-    } else {
-      // Payment initiation failed
+    const paymentTokenId = tokenResponse.data?.id;
+    if (!paymentTokenId) {
       order.payment.paymentStatus = "FAILED";
       await order.save();
-
-      res.status(400).json({
+      return res.status(400).json({
         success: false,
-        message: paymentResponse.data?.message || "Failed to initiate payment",
+        message: "Failed to create payment session",
       });
     }
+
+    order.payment.zwitchPaymentTokenId = paymentTokenId;
+    await order.save();
+
+    // Frontend will use paymentToken + accessKey to open Layer.checkout()
+    res.json({
+      success: true,
+      orderId: order._id,
+      merchantOrderId,
+      paymentToken: paymentTokenId,
+      accessKey: ZWITCH_PG_ACCESS_KEY,
+      layerScriptUrl: ZWITCH_ENV === "production"
+        ? "https://payments.open.money/layer"
+        : "https://sandbox-payments.open.money/layer",
+    });
   } catch (error) {
     console.error("Payment initiation error:", error.response?.data || error.message);
-    res.status(500).json({ 
-      message: error.response?.data?.message || error.message || "Failed to initiate payment" 
+    res.status(500).json({
+      message: error.response?.data?.message || error.message || "Failed to initiate payment",
     });
   }
 });
 
-// Check payment status
+// Check payment status (by merchantOrderId; server polls ZWITCH by payment token id)
 router.get("/status/:merchantOrderId", auth, async (req, res) => {
   try {
     const { merchantOrderId } = req.params;
@@ -247,7 +190,6 @@ router.get("/status/:merchantOrderId", auth, async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // If order is already marked as SUCCESS, return immediately (might have been updated by webhook)
     if (order.payment.paymentStatus === "SUCCESS") {
       return res.json({
         orderId: order._id,
@@ -256,114 +198,54 @@ router.get("/status/:merchantOrderId", auth, async (req, res) => {
       });
     }
 
-    // Check status with PhonePe (v2 API)
-    try {
-      const token = await getAccessToken();
-      const endpoint = `/checkout/v2/order/${merchantOrderId}/status`;
-
-      const statusResponse = await axios.get(
-        `${PHONEPE_BASE_URL}${endpoint}`,
-        {
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `O-Bearer ${token}`, // Note: O-Bearer (not Bearer)
-          },
-          params: {
-            details: true, // Get all payment attempts for better detection
-            errorContext: false, // Don't need error context for now
-          },
-        }
-      );
-      
-      console.log("PhonePe Status Response:", JSON.stringify(statusResponse.data, null, 2));
-
-      if (statusResponse.data) {
-        const paymentData = statusResponse.data;
-        
-        // Check paymentDetails array for successful payments
-        let hasSuccessfulPayment = false;
-        if (paymentData.paymentDetails && paymentData.paymentDetails.length > 0) {
-          // Check if any payment attempt was successful
-          const successfulPayment = paymentData.paymentDetails.find(
-            (payment) => payment.state === "COMPLETED"
-          );
-          
-          if (successfulPayment) {
-            hasSuccessfulPayment = true;
-            order.payment.paymentStatus = "SUCCESS";
-            order.status = "processing";
-            if (successfulPayment.transactionId) {
-              order.payment.phonepeTransactionId = successfulPayment.transactionId;
-            }
-          } else {
-            // Check if latest payment failed
-            const latestPayment = paymentData.paymentDetails[paymentData.paymentDetails.length - 1];
-            if (latestPayment.state === "FAILED") {
-              order.payment.paymentStatus = "FAILED";
-            }
+    const tokenId = order.payment.zwitchPaymentTokenId;
+    if (tokenId) {
+      try {
+        const statusResponse = await axios.get(
+          `${ZWITCH_BASE}${ZWITCH_PG_PATH}/payment_token/${tokenId}/payment`,
+          {
+            headers: getZwitchAuthHeader(),
           }
-        }
-        
-        // Also check the main state field
-        if (paymentData.state === "COMPLETED" || hasSuccessfulPayment) {
-          if (!hasSuccessfulPayment) {
-            order.payment.paymentStatus = "SUCCESS";
-            order.status = "processing";
-          }
-          
-          // Get transaction ID from paymentDetails if available
-          if (paymentData.paymentDetails && paymentData.paymentDetails.length > 0) {
-            const latestPayment = paymentData.paymentDetails[paymentData.paymentDetails.length - 1];
-            if (latestPayment.transactionId && !order.payment.phonepeTransactionId) {
-              order.payment.phonepeTransactionId = latestPayment.transactionId;
-            }
-          } else if (paymentData.orderId && !order.payment.phonepeTransactionId) {
-            order.payment.phonepeTransactionId = paymentData.orderId;
+        );
+
+        const data = statusResponse.data;
+        const paymentStatus = data?.status;
+        const tokenStatus = data?.payment_token?.status;
+
+        if (paymentStatus === "captured" || tokenStatus === "paid") {
+          order.payment.paymentStatus = "SUCCESS";
+          order.status = "processing";
+          if (data?.id) {
+            order.payment.paymentTransactionId = data.id;
           }
 
-          // Update stock quantities only if not already updated
-          if (order.status === "processing" && order.payment.paymentStatus === "SUCCESS") {
-            // Double-check to avoid duplicate stock updates
-            const needsStockUpdate = order.items.some((item) => {
-              // This is a simple check - in production, you might want a more robust method
-              return true; // For now, always update if payment is successful
-            });
-            
-            if (needsStockUpdate) {
-              for (const item of order.items) {
-                await Notebook.findByIdAndUpdate(item.notebook, {
-                  $inc: { stockQuantity: -item.quantity },
-                });
-              }
+          const needsStockUpdate = order.items?.length > 0;
+          if (needsStockUpdate) {
+            for (const item of order.items) {
+              await Notebook.findByIdAndUpdate(item.notebook, {
+                $inc: { stockQuantity: -item.quantity },
+              });
             }
           }
-        } else if (paymentData.state === "FAILED") {
-          order.payment.paymentStatus = "FAILED";
-        } else if (!hasSuccessfulPayment && paymentData.state !== "COMPLETED") {
-          // Keep as PENDING if not explicitly completed or failed
-          order.payment.paymentStatus = "PENDING";
-        }
 
-        await order.save();
-
-        // Update order in Supabase if payment status changed
-        if (paymentData.state === "COMPLETED" || hasSuccessfulPayment) {
+          await order.save();
           updateOrderInSupabase(order._id.toString(), {
             status: order.status,
             payment: order.payment,
-          }).catch((err) => {
-            console.error("Failed to update order in Supabase:", err);
-          });
+          }).catch((err) => console.error("Failed to update order in Supabase:", err));
+          generateAndSendInvoice(order._id).catch((err) =>
+            console.error("Failed to generate/send invoice:", err)
+          );
+        } else if (paymentStatus === "failed") {
+          order.payment.paymentStatus = "FAILED";
+          await order.save();
         }
+      } catch (statusError) {
+        console.error("ZWITCH status API error:", {
+          message: statusError.message,
+          response: statusError.response?.data,
+        });
       }
-    } catch (statusError) {
-      console.error("PhonePe Status API error:", {
-        message: statusError.message,
-        response: statusError.response?.data,
-        status: statusError.response?.status,
-      });
-      // Continue with existing order status from database
-      // The order might have been updated via webhook
     }
 
     res.json({
@@ -377,65 +259,70 @@ router.get("/status/:merchantOrderId", auth, async (req, res) => {
   }
 });
 
-// Webhook handler for PhonePe callbacks
-router.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+// ZWITCH webhook (payment_token_paid, payment_captured, etc.)
+// Note: Body is parsed by express.json(); we verify using canonical JSON string
+router.post("/webhook", async (req, res) => {
   try {
-    const xVerify = req.headers["x-verify"];
-    const payload = req.body.toString();
+    const signature = req.headers["x-zwitch-signature"];
+    const normalizedPayload = typeof req.body === "string"
+      ? JSON.stringify(JSON.parse(req.body))
+      : JSON.stringify(req.body);
 
-    // Verify webhook signature
-    const endpoint = "/pg/v1/webhook";
-    const expectedXVerify = generateXVerify(payload, endpoint);
-
-    if (xVerify !== expectedXVerify) {
-      console.error("Invalid webhook signature");
+    if (!verifyZwitchWebhookSignature(normalizedPayload, signature)) {
+      console.error("Invalid ZWITCH webhook signature");
       return res.status(401).json({ message: "Invalid signature" });
     }
 
-    // PhonePe webhook sends base64 encoded data
-    const webhookData = JSON.parse(
-      Buffer.from(payload, "base64").toString()
-    );
+    const payload = req.body;
+    const event = payload.event;
+    const mtx = payload.mtx || payload.payment_token?.mtx;
+    const paymentTokenId = payload.id || payload.payment_token?.id;
 
-    if (webhookData && webhookData.merchantTransactionId) {
-      const order = await Order.findOne({
-        "payment.merchantOrderId": webhookData.merchantTransactionId,
-      });
+    if (!mtx && !paymentTokenId) {
+      return res.status(200).json({ received: true });
+    }
 
-      if (order) {
-        // Update payment status based on webhook
-        if (webhookData.code === "PAYMENT_SUCCESS" && webhookData.state === "COMPLETED") {
-          order.payment.paymentStatus = "SUCCESS";
-          order.status = "processing";
-          order.payment.phonepeTransactionId = webhookData.transactionId;
+    const order = await Order.findOne({
+      $or: [
+        { "payment.merchantOrderId": mtx },
+        { "payment.zwitchPaymentTokenId": paymentTokenId },
+      ],
+    });
 
-          // Update stock quantities
-          for (const item of order.items) {
-            await Notebook.findByIdAndUpdate(item.notebook, {
-              $inc: { stockQuantity: -item.quantity },
-            });
-          }
+    if (!order) {
+      return res.status(200).json({ received: true });
+    }
 
-          // Update order in Supabase
-          updateOrderInSupabase(order._id.toString(), {
-            status: order.status,
-            payment: order.payment,
-          }).catch((err) => {
-            console.error("Failed to update order in Supabase:", err);
-          });
-        } else if (webhookData.code === "PAYMENT_ERROR" || webhookData.state === "FAILED") {
-          order.payment.paymentStatus = "FAILED";
+    const isPaid =
+      event === "payment_token_paid" ||
+      event === "payment_captured" ||
+      payload.status === "paid";
 
-          // Update order in Supabase
-          updateOrderInSupabase(order._id.toString(), {
-            payment: order.payment,
-          }).catch((err) => {
-            console.error("Failed to update order in Supabase:", err);
-          });
-        }
-
-        await order.save();
+    if (isPaid) {
+      order.payment.paymentStatus = "SUCCESS";
+      order.status = "processing";
+      if (payload.payment?.id) {
+        order.payment.paymentTransactionId = payload.payment.id;
       }
+
+      for (const item of order.items) {
+        await Notebook.findByIdAndUpdate(item.notebook, {
+          $inc: { stockQuantity: -item.quantity },
+        });
+      }
+
+      await order.save();
+      updateOrderInSupabase(order._id.toString(), {
+        status: order.status,
+        payment: order.payment,
+      }).catch((err) => console.error("Failed to update order in Supabase:", err));
+      generateAndSendInvoice(order._id).catch((err) =>
+        console.error("Failed to generate/send invoice:", err)
+      );
+    } else if (event === "payment_failed" || event === "payment_cancelled") {
+      order.payment.paymentStatus = "FAILED";
+      await order.save();
+      updateOrderInSupabase(order._id.toString(), { payment: order.payment }).catch(() => {});
     }
 
     res.status(200).json({ success: true });

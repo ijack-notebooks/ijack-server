@@ -10,6 +10,7 @@
     "seed-admin": "node scripts/seedAdmin.js",
     "cleanup-images": "node scripts/cleanupOldImages.js",
     "create-bucket": "node scripts/createStorageBucket.js",
+    "create-invoices-bucket": "node scripts/createInvoicesBucket.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "shreyansh",
@@ -26,6 +27,7 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^8.0.3",
     "multer": "^2.0.2",
-    "pg-sdk-node": "https://phonepe.mycloudrepo.io/public/repositories/phonepe-pg-sdk-node/releases/v2/phonepe-pg-sdk-node-2.0.3.tgz"
+    "pdfkit": "^0.15.2",
+    "resend": "^4.8.0"
   }
 }
