@@ -9,6 +9,11 @@ const SHIPROCKET_EMAIL = process.env.SHIPROCKET_EMAIL;
 const SHIPROCKET_PASSWORD = process.env.SHIPROCKET_PASSWORD;
 const SHIPROCKET_PICKUP_LOCATION = process.env.SHIPROCKET_PICKUP_LOCATION;
 const SHIPROCKET_WEBHOOK_SECRET = process.env.SHIPROCKET_WEBHOOK_SECRET || "";
+const SHIPROCKET_WEBHOOK_AUTH_ENABLED =
+  process.env.SHIPROCKET_WEBHOOK_AUTH_ENABLED === undefined ||
+  process.env.SHIPROCKET_WEBHOOK_AUTH_ENABLED === "" ||
+  process.env.SHIPROCKET_WEBHOOK_AUTH_ENABLED === "true" ||
+  process.env.SHIPROCKET_WEBHOOK_AUTH_ENABLED === "1";
 const SHIPROCKET_BASE_URL = "https://apiv2.shiprocket.in";
 
 // When true, no real API calls; mock responses so you can test the admin flow without creating real shipments.
@@ -98,6 +103,7 @@ module.exports = {
   SHIPROCKET_BASE_URL,
   SHIPROCKET_PICKUP_LOCATION,
   SHIPROCKET_WEBHOOK_SECRET,
+  SHIPROCKET_WEBHOOK_AUTH_ENABLED,
   SHIPROCKET_TEST_MODE,
   isTestMode,
   isConfigured,

@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const Order = require("../models/Order");
-const { SHIPROCKET_WEBHOOK_SECRET } = require("../config/shiprocket");
+const { SHIPROCKET_WEBHOOK_AUTH_ENABLED, SHIPROCKET_WEBHOOK_SECRET } = require("../config/shiprocket");
 const { updateOrderInSupabase } = require("../utils/supabaseOrders");
 
 function getByPath(obj, path) {
@@ -149,7 +149,7 @@ function extractWebhookFields(payload) {
 
 router.post("/webhook", async (req, res) => {
   try {
-    if (SHIPROCKET_WEBHOOK_SECRET) {
+    if (SHIPROCKET_WEBHOOK_AUTH_ENABLED && SHIPROCKET_WEBHOOK_SECRET) {
       const providedSecret =
         req.get("token") ||
         req.get("Token") ||

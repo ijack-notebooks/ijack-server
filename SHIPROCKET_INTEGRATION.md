@@ -62,6 +62,8 @@ Restart the server after changing `.env`.
 - Header name: `x-shiprocket-webhook-secret`
 - Header value: your `SHIPROCKET_WEBHOOK_SECRET`
 
+To get the Shiprocket dashboard “Test” to pass (e.g. when their test doesn’t send the token), set `SHIPROCKET_WEBHOOK_AUTH_ENABLED=false` in `.env` or in Render env. The webhook will accept requests without validating the secret. Set it back to `true` (or remove it) when you want to enforce the secret again.
+
 #### D. (Optional) Use test mode
 
 To test the Shiprocket flow **without creating real shipments** and **without API credentials**:
