@@ -151,6 +151,8 @@ router.post("/webhook", async (req, res) => {
   try {
     if (SHIPROCKET_WEBHOOK_SECRET) {
       const providedSecret =
+        req.get("token") ||
+        req.get("Token") ||
         req.get("x-shiprocket-webhook-secret") ||
         req.get("X-Shiprocket-Webhook-Secret") ||
         req.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
