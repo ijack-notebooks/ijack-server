@@ -155,10 +155,13 @@ router.post("/webhook", async (req, res) => {
         req.get("Token") ||
         req.get("x-shiprocket-webhook-secret") ||
         req.get("X-Shiprocket-Webhook-Secret") ||
-        req.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+        req.get("authorization")?.replace(/^Bearer\s+/i, "").trim() ||
+        req.body?.token ||
+        req.query?.token;
 
       if (providedSecret !== SHIPROCKET_WEBHOOK_SECRET) {
-        return res.status(401).json({ message: "Invalid Shiprocket webhook secret" });
+        console.warn("Webhook auth failed. Headers:", JSON.stringify(req.headers));
+        return res.status(401).json({ message: "Invalid webhook secret" });
       }
     }
 
