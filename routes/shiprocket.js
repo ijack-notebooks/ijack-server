@@ -381,6 +381,59 @@ router.get("/track/:awb", adminAuth, async (req, res) => {
   }
 });
 
+// Cancel Shiprocket order (removes from Shiprocket; clears shiprocket data on our order)
+router.post("/cancel", adminAuth, async (req, res) => {
+  try {
+    if (!isConfigured()) {
+      return res.status(503).json({ message: "Shiprocket not configured" });
+    }
+
+    const { orderId } = req.body; // our MongoDB order _id
+    if (!orderId) {
+      return res.status(400).json({ message: "orderId is required" });
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const srOrderId = order.shiprocket?.orderId;
+    if (!srOrderId) {
+      return res.status(400).json({ message: "No Shiprocket shipment found for this order" });
+    }
+
+    if (isTestMode()) {
+      const updated = await Order.findByIdAndUpdate(orderId, { $unset: { shiprocket: "" } }, { new: true });
+      updateOrderInSupabase(orderId.toString(), {}).catch(() => {});
+      return res.json({
+        message: "[TEST MODE] Shipment cancelled (mock)",
+        order: updated,
+      });
+    }
+
+    const data = await shiprocketFetch("/v1/external/orders/cancel", {
+      method: "POST",
+      body: JSON.stringify({ ids: [Number(srOrderId)] }),
+    });
+
+    const updated = await Order.findByIdAndUpdate(orderId, { $unset: { shiprocket: "" } }, { new: true });
+    updateOrderInSupabase(orderId.toString(), {}).catch(() => {});
+
+    res.json({
+      message: "Shipment cancelled",
+      data,
+      order: updated,
+    });
+  } catch (error) {
+    console.error("Shiprocket cancel error:", error);
+    res.status(error.status || 500).json({
+      message: error.message || "Failed to cancel shipment",
+      error: error.response || undefined,
+    });
+  }
+});
+
 // Check pincode serviceability (optional)
 router.get("/serviceability", adminAuth, async (req, res) => {
   try {
