@@ -8,6 +8,7 @@
     "dev": "node index.js",
     "seed": "node scripts/seed.js",
     "seed-admin": "node scripts/seedAdmin.js",
+    "migrate-to-production": "node scripts/migrate-to-production.js",
     "cleanup-images": "node scripts/cleanupOldImages.js",
     "create-bucket": "node scripts/createStorageBucket.js",
     "create-invoices-bucket": "node scripts/createInvoicesBucket.js",
