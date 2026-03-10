@@ -9,6 +9,7 @@ const PromoCode = require("../models/PromoCode");
 const { auth } = require("../middleware/auth");
 const { storeOrderInSupabase, updateOrderInSupabase } = require("../utils/supabaseOrders");
 const { generateAndSendInvoice } = require("../utils/invoice");
+const { appendPaymentHistory } = require("../utils/paymentHistory");
 
 // ZWITCH Configuration (Layer Payment Gateway)
 // https://developers.zwitch.io/reference
@@ -29,6 +30,38 @@ const getZwitchAuthHeader = () => {
   const credentials = `${ZWITCH_PG_ACCESS_KEY}:${ZWITCH_PG_SECRET_KEY}`;
   return { Authorization: `Bearer ${credentials}` };
 };
+
+// Normalize ZWITCH payment mode to stored payment method (upi | netbanking | card).
+// Ref: https://developers.zwitch.io/reference/response-parameters
+function normalizePaymentMethod(rawTypeName) {
+  if (!rawTypeName || typeof rawTypeName !== "string") return null;
+  const t = rawTypeName.toLowerCase().trim().replace(/[-\s]+/g, "_");
+
+  if (t.includes("net") && t.includes("bank")) return "netbanking";
+  if (t.includes("credit") && t.includes("card")) return "card";
+  if (t.includes("debit") && t.includes("card")) return "card";
+  if (t.includes("card")) return "card";
+  if (t.includes("upi")) return "upi";
+
+  return rawTypeName;
+}
+
+function extractPaymentMethodFromPayload(payload = {}) {
+  const explicit = normalizePaymentMethod(
+    payload?.type_name ||
+      payload?.payment?.type_name ||
+      payload?.payment_instrument?.type_name ||
+      payload?.payment_instrument?.type ||
+      payload?.payment_method ||
+      payload?.paid_mode,
+  );
+  if (explicit) return explicit;
+
+  // Fallback: if vpa (UPI handle) is a non-empty string, the customer paid via UPI
+  if (typeof payload?.vpa === "string" && payload.vpa.trim()) return "upi";
+
+  return null;
+}
 
 // Verify ZWITCH webhook signature (x-zwitch-signature); payload = normalized JSON string
 const verifyZwitchWebhookSignature = (normalizedPayload, signature) => {
@@ -141,6 +174,16 @@ router.post("/initiate", auth, async (req, res) => {
       },
     });
 
+    appendPaymentHistory(order, {
+      action: "payment_initiated",
+      status: "PENDING",
+      message: "Order created and payment initiated via ZWITCH",
+      data: {
+        amount: totalAmount,
+        merchantOrderId,
+      },
+    });
+
     await order.save();
 
     (async () => {
@@ -178,6 +221,11 @@ router.post("/initiate", auth, async (req, res) => {
     const paymentTokenId = tokenResponse.data?.id;
     if (!paymentTokenId) {
       order.payment.paymentStatus = "FAILED";
+      appendPaymentHistory(order, {
+        action: "payment_session_failed",
+        status: "FAILED",
+        message: "ZWITCH did not return a payment token",
+      });
       await order.save();
       return res.status(400).json({
         success: false,
@@ -186,6 +234,12 @@ router.post("/initiate", auth, async (req, res) => {
     }
 
     order.payment.zwitchPaymentTokenId = paymentTokenId;
+    appendPaymentHistory(order, {
+      action: "payment_session_created",
+      status: "PENDING",
+      message: "ZWITCH payment token created",
+      data: { paymentTokenId },
+    });
     await order.save();
 
     // Frontend will use paymentToken + accessKey to open Layer.checkout()
@@ -207,6 +261,39 @@ router.post("/initiate", auth, async (req, res) => {
   }
 });
 
+// Persist payment method from Layer callback as a fallback source.
+router.post("/method", auth, async (req, res) => {
+  try {
+    const { merchantOrderId, paymentMethod } = req.body || {};
+    if (!merchantOrderId || !paymentMethod) {
+      return res.status(400).json({ message: "merchantOrderId and paymentMethod are required" });
+    }
+
+    const normalized = normalizePaymentMethod(paymentMethod);
+    if (!normalized) {
+      return res.status(400).json({ message: "Invalid payment method" });
+    }
+
+    const order = await Order.findOne({
+      "payment.merchantOrderId": merchantOrderId,
+      user: req.user._id,
+    });
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    if (order.payment?.paymentMethod !== normalized) {
+      order.payment.paymentMethod = normalized;
+      await order.save();
+      updateOrderInSupabase(order._id.toString(), { payment: order.payment }).catch(() => {});
+    }
+
+    res.json({ success: true, paymentMethod: order.payment?.paymentMethod || normalized });
+  } catch (error) {
+    res.status(500).json({ message: error.message || "Failed to save payment method" });
+  }
+});
+
 // Check payment status (by merchantOrderId; server polls ZWITCH by payment token id)
 router.get("/status/:merchantOrderId", auth, async (req, res) => {
   try {
@@ -221,16 +308,9 @@ router.get("/status/:merchantOrderId", auth, async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    if (order.payment.paymentStatus === "SUCCESS") {
-      return res.json({
-        orderId: order._id,
-        paymentStatus: order.payment.paymentStatus,
-        orderStatus: order.status,
-      });
-    }
-
     const tokenId = order.payment.zwitchPaymentTokenId;
-    if (tokenId) {
+    const shouldBackfillMethod = order.payment.paymentStatus === "SUCCESS" && !order.payment.paymentMethod;
+    if (tokenId && (order.payment.paymentStatus !== "SUCCESS" || shouldBackfillMethod)) {
       try {
         const statusResponse = await axios.get(
           `${ZWITCH_BASE}${ZWITCH_PG_PATH}/payment_token/${tokenId}/payment`,
@@ -242,12 +322,27 @@ router.get("/status/:merchantOrderId", auth, async (req, res) => {
         const data = statusResponse.data;
         const paymentStatus = data?.status;
         const tokenStatus = data?.payment_token?.status;
+        const method = extractPaymentMethodFromPayload(data);
+        if (method) order.payment.paymentMethod = method;
 
         if (paymentStatus === "captured" || tokenStatus === "paid") {
+          const shouldRecordSuccess =
+            order.payment.paymentStatus !== "SUCCESS" || !order.payment.paymentTransactionId;
           order.payment.paymentStatus = "SUCCESS";
           order.status = "processing";
           if (data?.id) {
             order.payment.paymentTransactionId = data.id;
+          }
+          if (shouldRecordSuccess) {
+            appendPaymentHistory(order, {
+              action: "payment_captured",
+              status: "SUCCESS",
+              message: "Payment captured after status check",
+              data: {
+                paymentId: data?.id || null,
+                tokenId,
+              },
+            });
           }
 
           const needsStockUpdate = order.items?.length > 0;
@@ -271,8 +366,19 @@ router.get("/status/:merchantOrderId", auth, async (req, res) => {
             console.error("Failed to generate/send invoice:", err)
           );
         } else if (paymentStatus === "failed") {
+          if (order.payment.paymentStatus !== "FAILED") {
+            appendPaymentHistory(order, {
+              action: "payment_failed",
+              status: "FAILED",
+              message: "Payment failed during status check",
+              data: { tokenId },
+            });
+          }
           order.payment.paymentStatus = "FAILED";
           await order.save();
+        } else if (shouldBackfillMethod && method) {
+          await order.save();
+          updateOrderInSupabase(order._id.toString(), { payment: order.payment }).catch(() => {});
         }
       } catch (statusError) {
         console.error("ZWITCH status API error:", {
@@ -333,10 +439,26 @@ router.post("/webhook", async (req, res) => {
       payload.status === "paid";
 
     if (isPaid) {
+      const shouldRecordSuccess =
+        order.payment.paymentStatus !== "SUCCESS" || !order.payment.paymentTransactionId;
       order.payment.paymentStatus = "SUCCESS";
       order.status = "processing";
       if (payload.payment?.id) {
         order.payment.paymentTransactionId = payload.payment.id;
+      }
+      const method = extractPaymentMethodFromPayload(payload);
+      if (method) order.payment.paymentMethod = method;
+      if (shouldRecordSuccess) {
+        appendPaymentHistory(order, {
+          action: "payment_captured",
+          status: "SUCCESS",
+          message: `Payment captured via webhook (${event || "zwitch"})`,
+          data: {
+            paymentId: payload.payment?.id || null,
+            paymentTokenId,
+            event,
+          },
+        });
       }
 
       for (const item of order.items) {
@@ -357,6 +479,14 @@ router.post("/webhook", async (req, res) => {
         console.error("Failed to generate/send invoice:", err)
       );
     } else if (event === "payment_failed" || event === "payment_cancelled") {
+      if (order.payment.paymentStatus !== "FAILED") {
+        appendPaymentHistory(order, {
+          action: event === "payment_cancelled" ? "payment_cancelled" : "payment_failed",
+          status: "FAILED",
+          message: `Payment ${event === "payment_cancelled" ? "cancelled" : "failed"} via webhook`,
+          data: { event, paymentTokenId },
+        });
+      }
       order.payment.paymentStatus = "FAILED";
       await order.save();
       updateOrderInSupabase(order._id.toString(), { payment: order.payment }).catch(() => {});

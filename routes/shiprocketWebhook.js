@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const Order = require("../models/Order");
 const { SHIPROCKET_WEBHOOK_AUTH_ENABLED, SHIPROCKET_WEBHOOK_SECRET } = require("../config/shiprocket");
+const { appendShiprocketHistory, ensureShiprocketState } = require("../utils/shiprocketHistory");
 const { updateOrderInSupabase } = require("../utils/supabaseOrders");
 
 function getByPath(obj, path) {
@@ -195,7 +196,7 @@ router.post("/webhook", async (req, res) => {
       return res.json({ received: true, matched: false });
     }
 
-    if (!order.shiprocket) order.shiprocket = {};
+    const shiprocket = ensureShiprocketState(order);
 
     if (shipmentId != null) order.shiprocket.shipmentId = shipmentId;
     if (shiprocketOrderId != null) order.shiprocket.orderId = shiprocketOrderId;
@@ -204,6 +205,10 @@ router.post("/webhook", async (req, res) => {
     if (trackingStatus) order.shiprocket.trackingStatus = trackingStatus;
     if (trackingUrl) order.shiprocket.trackingUrl = trackingUrl;
     order.shiprocket.lastWebhookAt = new Date();
+    if (trackingStatus && trackingStatus.toLowerCase().includes("cancel")) {
+      shiprocket.active = false;
+      shiprocket.cancelledAt = new Date();
+    }
 
     const nextOrderStatus = mapOrderStatusFromShipmentStatus(trackingStatus);
     if (nextOrderStatus === "delivered") {
@@ -217,6 +222,18 @@ router.post("/webhook", async (req, res) => {
     ) {
       order.status = "shipped";
     }
+
+    appendShiprocketHistory(order, {
+      action: "tracking_update",
+      status: trackingStatus || null,
+      message: trackingStatus || "Tracking update received from webhook",
+      data: {
+        awbCode,
+        courierName,
+        trackingUrl,
+        scans: payload.scans || payload.data?.scans || [],
+      },
+    });
 
     await order.save();
     updateOrderInSupabase(order._id.toString(), { status: order.status }).catch(() => {});

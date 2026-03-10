@@ -17,6 +17,60 @@ const OrderItemSchema = new mongoose.Schema({
   },
 });
 
+const ShiprocketHistorySchema = new mongoose.Schema(
+  {
+    action: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    status: {
+      type: String,
+      default: null,
+    },
+    message: {
+      type: String,
+      default: "",
+    },
+    data: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    at: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: false },
+);
+
+const PaymentHistorySchema = new mongoose.Schema(
+  {
+    action: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    status: {
+      type: String,
+      default: null,
+    },
+    message: {
+      type: String,
+      default: "",
+    },
+    data: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    at: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: false },
+);
+
 const OrderSchema = new mongoose.Schema({
   user: {
     type: mongoose.Schema.Types.ObjectId,
@@ -98,6 +152,10 @@ const OrderSchema = new mongoose.Schema({
       type: Date,
       default: null,
     },
+    history: {
+      type: [PaymentHistorySchema],
+      default: [],
+    },
   },
   invoiceNumber: {
     type: String,
@@ -118,9 +176,16 @@ const OrderSchema = new mongoose.Schema({
     awbCode: { type: String },
     courierName: { type: String },
     labelUrl: { type: String },
+    active: { type: Boolean, default: true },
+    lastAction: { type: String },
     trackingStatus: { type: String },
     trackingUrl: { type: String },
     lastWebhookAt: { type: Date },
+    cancelledAt: { type: Date },
+    history: {
+      type: [ShiprocketHistorySchema],
+      default: [],
+    },
     createdAt: { type: Date, default: Date.now },
   },
   createdAt: {

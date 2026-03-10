@@ -13,7 +13,9 @@ const {
   isTestMode,
   shiprocketFetch,
 } = require("../config/shiprocket");
+const { appendShiprocketHistory, ensureShiprocketState } = require("../utils/shiprocketHistory");
 const { updateOrderInSupabase } = require("../utils/supabaseOrders");
+const { cancelShiprocketShipment } = require("../utils/orderOperations");
 
 // Default package weight in kg (notebooks; minimum chargeable is 0.5 kg)
 const DEFAULT_WEIGHT_KG = 0.5;
@@ -52,7 +54,7 @@ router.post("/create-order", adminAuth, async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    if (order.shiprocket?.orderId) {
+    if (order.shiprocket?.orderId && order.shiprocket?.active !== false) {
       return res.status(400).json({
         message: "Order already created in Shiprocket",
         shiprocketOrderId: order.shiprocket.orderId,
@@ -70,18 +72,34 @@ router.post("/create-order", adminAuth, async (req, res) => {
     if (isTestMode()) {
       const mockOrderId = 90000000 + Math.floor(Math.random() * 999999);
       const mockShipmentId = 90000000 + Math.floor(Math.random() * 999999);
+      const existingHistory = Array.isArray(order.shiprocket?.history)
+        ? order.shiprocket.history
+        : [];
       order.shiprocket = {
         orderId: mockOrderId,
         shipmentId: mockShipmentId,
         awbCode: null,
         courierName: null,
         labelUrl: null,
+        active: true,
+        lastAction: null,
         trackingStatus: null,
         trackingUrl: null,
+        cancelledAt: null,
+        history: existingHistory,
         createdAt: new Date(),
       };
+      appendShiprocketHistory(order, {
+        action: "shipment_created",
+        status: "Created",
+        message: "[TEST MODE] Shipment created in Shiprocket",
+        data: { shiprocketOrderId: mockOrderId, shipmentId: mockShipmentId },
+      });
+      if (order.status === "pending") {
+        order.status = "processing";
+      }
       await order.save();
-      updateOrderInSupabase(order._id.toString(), {}).catch(() => {});
+      updateOrderInSupabase(order._id.toString(), { status: order.status }).catch(() => {});
       return res.json({
         message: "[TEST MODE] Order created in Shiprocket (mock)",
         order_id: mockOrderId,
@@ -175,16 +193,29 @@ router.post("/create-order", adminAuth, async (req, res) => {
       throw new Error(data?.message || data?.error || "Shiprocket did not return order_id");
     }
 
+    const existingHistory = Array.isArray(order.shiprocket?.history)
+      ? order.shiprocket.history
+      : [];
     order.shiprocket = {
       orderId: srOrderId,
       shipmentId,
       awbCode: null,
       courierName: null,
       labelUrl: null,
+      active: true,
+      lastAction: null,
       trackingStatus: null,
       trackingUrl: null,
+      cancelledAt: null,
+      history: existingHistory,
       createdAt: new Date(),
     };
+    appendShiprocketHistory(order, {
+      action: "shipment_created",
+      status: "Created",
+      message: "Shipment created in Shiprocket",
+      data: { shiprocketOrderId: srOrderId, shipmentId },
+    });
     if (order.status === "pending") {
       order.status = "processing";
     }
@@ -242,9 +273,16 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
     if (isTestMode()) {
       const mockAwb = "TEST" + String(1000000000 + Math.floor(Math.random() * 999999999)).slice(0, 10);
       const mockCourier = "Test Courier (Test Mode)";
-      if (!order.shiprocket) order.shiprocket = {};
+      const shiprocket = ensureShiprocketState(order);
+      shiprocket.active = true;
       order.shiprocket.awbCode = mockAwb;
       order.shiprocket.courierName = mockCourier;
+      appendShiprocketHistory(order, {
+        action: "awb_assigned",
+        status: "AWB assigned",
+        message: "[TEST MODE] AWB assigned",
+        data: { awbCode: mockAwb, courierName: mockCourier },
+      });
       await order.save();
       updateOrderInSupabase(order._id.toString(), {}).catch(() => {});
       return res.json({
@@ -286,9 +324,16 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
       return res.status(422).json({ message });
     }
 
-    if (!order.shiprocket) order.shiprocket = {};
+    const shiprocket = ensureShiprocketState(order);
+    shiprocket.active = true;
     order.shiprocket.awbCode = awbCode;
     order.shiprocket.courierName = courierName;
+    appendShiprocketHistory(order, {
+      action: "awb_assigned",
+      status: "AWB assigned",
+      message: "AWB assigned in Shiprocket",
+      data: { awbCode, courierName },
+    });
     await order.save();
 
     updateOrderInSupabase(order._id.toString(), {}).catch(() => {});
@@ -344,10 +389,14 @@ router.post("/generate-label", adminAuth, async (req, res) => {
 
     if (isTestMode()) {
       const labelUrl = "https://via.placeholder.com/400x600?text=Test+Label+(Test+Mode)";
-      if (order.shiprocket) {
-        order.shiprocket.labelUrl = labelUrl;
-        await order.save();
-      }
+      const shiprocket = ensureShiprocketState(order);
+      shiprocket.labelUrl = labelUrl;
+      appendShiprocketHistory(order, {
+        action: "label_generated",
+        message: "[TEST MODE] Shipping label generated",
+        data: { labelUrl },
+      });
+      await order.save();
       return res.json({
         message: "[TEST MODE] Label generated (mock)",
         label_url: labelUrl,
@@ -361,8 +410,14 @@ router.post("/generate-label", adminAuth, async (req, res) => {
     });
 
     const labelUrl = data.label_url ?? data.url ?? data.pdf_url;
-    if (labelUrl && order.shiprocket) {
-      order.shiprocket.labelUrl = labelUrl;
+    if (labelUrl) {
+      const shiprocket = ensureShiprocketState(order);
+      shiprocket.labelUrl = labelUrl;
+      appendShiprocketHistory(order, {
+        action: "label_generated",
+        message: "Shipping label generated",
+        data: { labelUrl },
+      });
       await order.save();
     }
 
@@ -398,9 +453,16 @@ router.post("/generate-pickup", adminAuth, async (req, res) => {
     }
 
     if (isTestMode()) {
+      appendShiprocketHistory(order, {
+        action: "pickup_requested",
+        status: "Pickup requested",
+        message: "[TEST MODE] Pickup request submitted",
+      });
+      await order.save();
       return res.json({
         message: "[TEST MODE] Pickup request submitted (mock)",
         data: { status: "success", testMode: true },
+        order,
       });
     }
 
@@ -411,11 +473,99 @@ router.post("/generate-pickup", adminAuth, async (req, res) => {
       }),
     });
 
-    res.json({ message: "Pickup generated", data });
+    appendShiprocketHistory(order, {
+      action: "pickup_requested",
+      status: "Pickup requested",
+      message: "Pickup scheduling requested in Shiprocket",
+      data,
+    });
+    await order.save();
+
+    res.json({ message: "Pickup generated", data, order });
   } catch (error) {
     console.error("Shiprocket generate pickup error:", error);
     res.status(error.status || 500).json({
       message: error.message || "Failed to generate pickup",
+      error: error.response || undefined,
+    });
+  }
+});
+
+// Cancel pickup only (keeps shipment active; does not cancel the Shiprocket order)
+router.post("/cancel-pickup", adminAuth, async (req, res) => {
+  try {
+    if (!isConfigured()) {
+      return res.status(503).json({ message: "Shiprocket not configured" });
+    }
+
+    const { orderId } = req.body;
+    if (!orderId) {
+      return res.status(400).json({ message: "orderId is required" });
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order?.shiprocket?.shipmentId) {
+      return res.status(400).json({ message: "Create Shiprocket order and assign AWB first" });
+    }
+
+    const shipmentId = order.shiprocket.shipmentId;
+
+    if (isTestMode()) {
+      appendShiprocketHistory(order, {
+        action: "pickup_cancelled",
+        status: order.shiprocket?.trackingStatus || "Pickup cancelled",
+        message: "[TEST MODE] Pickup cancelled (shipment remains active)",
+      });
+      await order.save();
+      return res.json({
+        message: "[TEST MODE] Pickup cancelled (mock)",
+        order,
+      });
+    }
+
+    try {
+      const pickupCancelData = await shiprocketFetch("/v1/external/courier/cancel/pickup", {
+        method: "POST",
+        body: JSON.stringify({ shipment_id: [Number(shipmentId)] }),
+      });
+      appendShiprocketHistory(order, {
+        action: "pickup_cancelled",
+        status: order.shiprocket?.trackingStatus || "Pickup cancelled",
+        message: "Pickup cancelled; shipment remains active",
+        data: pickupCancelData,
+      });
+    } catch (pickupErr) {
+      const status = pickupErr.status || (pickupErr.response && pickupErr.response.status);
+      const isNotFoundOrAlreadyCancelled = status === 404 || status === 400 || status === 422;
+      if (isNotFoundOrAlreadyCancelled) {
+        appendShiprocketHistory(order, {
+          action: "pickup_cancelled",
+          status: order.shiprocket?.trackingStatus || "Pickup cancelled",
+          message: "Pickup was already cancelled or not found; no action needed",
+          data: pickupErr.response || null,
+        });
+      } else {
+        console.warn("Shiprocket cancel pickup:", pickupErr.message);
+        appendShiprocketHistory(order, {
+          action: "pickup_cancel_failed",
+          status: order.shiprocket?.trackingStatus || null,
+          message: `Pickup cancellation failed: ${pickupErr.message}`,
+          data: pickupErr.response || null,
+        });
+        await order.save();
+        return res.status(status || 502).json({
+          message: pickupErr.message || "Failed to cancel pickup",
+          order,
+        });
+      }
+    }
+
+    await order.save();
+    res.json({ message: "Pickup cancelled", order });
+  } catch (error) {
+    console.error("Shiprocket cancel pickup error:", error);
+    res.status(error.status || 500).json({
+      message: error.message || "Failed to cancel pickup",
       error: error.response || undefined,
     });
   }
@@ -463,14 +613,10 @@ router.get("/track/:awb", adminAuth, async (req, res) => {
   }
 });
 
-// Cancel Shiprocket order (removes from Shiprocket; clears shiprocket data on our order).
+// Cancel Shiprocket order and preserve shipment history on our order.
 // If a pickup was scheduled, cancel it first (Shiprocket does not auto-cancel pickup when order is cancelled).
 router.post("/cancel", adminAuth, async (req, res) => {
   try {
-    if (!isConfigured()) {
-      return res.status(503).json({ message: "Shiprocket not configured" });
-    }
-
     const { orderId } = req.body; // our MongoDB order _id
     if (!orderId) {
       return res.status(400).json({ message: "orderId is required" });
@@ -481,46 +627,24 @@ router.post("/cancel", adminAuth, async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    const srOrderId = order.shiprocket?.orderId;
-    const shipmentId = order.shiprocket?.shipmentId;
-    if (!srOrderId) {
-      return res.status(400).json({ message: "No Shiprocket shipment found for this order" });
-    }
-
-    if (isTestMode()) {
-      const updated = await Order.findByIdAndUpdate(orderId, { $unset: { shiprocket: "" } }, { new: true });
-      updateOrderInSupabase(orderId.toString(), {}).catch(() => {});
-      return res.json({
-        message: "[TEST MODE] Shipment cancelled (mock)",
-        order: updated,
-      });
-    }
-
-    // Cancel scheduled pickup first (if any). Shiprocket does not auto-cancel pickup when order is cancelled.
-    if (shipmentId) {
-      try {
-        await shiprocketFetch("/v1/external/courier/cancel/pickup", {
-          method: "POST",
-          body: JSON.stringify({ shipment_id: [Number(shipmentId)] }),
-        });
-      } catch (pickupErr) {
-        // Pickup may not have been requested, or already picked up; still proceed with order cancel
-        console.warn("Shiprocket cancel pickup (optional):", pickupErr.message);
-      }
-    }
-
-    const data = await shiprocketFetch("/v1/external/orders/cancel", {
-      method: "POST",
-      body: JSON.stringify({ ids: [Number(srOrderId)] }),
+    const shipmentResult = await cancelShiprocketShipment(order, {
+      source: "shipment_page",
+      reason: "Shipment cancelled in Shiprocket",
+      strict: true,
     });
 
-    const updated = await Order.findByIdAndUpdate(orderId, { $unset: { shiprocket: "" } }, { new: true });
-    updateOrderInSupabase(orderId.toString(), {}).catch(() => {});
+    order.status = "cancelled";
+
+    await order.save();
+    updateOrderInSupabase(orderId.toString(), {
+      status: order.status,
+      payment: order.payment,
+    }).catch(() => {});
 
     res.json({
       message: "Shipment cancelled",
-      data,
-      order: updated,
+      data: shipmentResult.data,
+      order,
     });
   } catch (error) {
     console.error("Shiprocket cancel error:", error);
