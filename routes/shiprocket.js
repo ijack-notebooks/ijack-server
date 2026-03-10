@@ -466,19 +466,37 @@ router.post("/generate-pickup", adminAuth, async (req, res) => {
       });
     }
 
-    const data = await shiprocketFetch("/v1/external/courier/generate/pickup", {
-      method: "POST",
-      body: JSON.stringify({
-        shipment_id: [order.shiprocket.shipmentId],
-      }),
-    });
+    let data = null;
+    try {
+      data = await shiprocketFetch("/v1/external/courier/generate/pickup", {
+        method: "POST",
+        body: JSON.stringify({
+          shipment_id: [order.shiprocket.shipmentId],
+        }),
+      });
 
-    appendShiprocketHistory(order, {
-      action: "pickup_requested",
-      status: "Pickup requested",
-      message: "Pickup scheduling requested in Shiprocket",
-      data,
-    });
+      appendShiprocketHistory(order, {
+        action: "pickup_requested",
+        status: "Pickup requested",
+        message: "Pickup scheduling requested in Shiprocket",
+        data,
+      });
+    } catch (pickupErr) {
+      const errMsg = String(pickupErr?.message || "").toLowerCase();
+      const alreadyQueued = errMsg.includes("already in pickup queue");
+      if (!alreadyQueued) {
+        throw pickupErr;
+      }
+
+      // Treat idempotent "already queued" response as success so admins can re-request safely.
+      appendShiprocketHistory(order, {
+        action: "pickup_requested",
+        status: "Pickup requested",
+        message: "Pickup already in queue in Shiprocket",
+        data: pickupErr.response || null,
+      });
+      data = pickupErr.response || { message: pickupErr.message };
+    }
     await order.save();
 
     res.json({ message: "Pickup generated", data, order });

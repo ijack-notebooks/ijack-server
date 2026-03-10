@@ -12,6 +12,18 @@ const AdminSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  email: {
+    type: String,
+    unique: true,
+    sparse: true,
+    trim: true,
+    lowercase: true,
+  },
+  role: {
+    type: String,
+    enum: ["super-admin", "secondary-admin"],
+    default: "secondary-admin",
+  },
   createdAt: {
     type: Date,
     default: Date.now,

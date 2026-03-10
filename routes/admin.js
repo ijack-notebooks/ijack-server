@@ -8,7 +8,8 @@ const Notebook = require("../models/Notebook");
 const Category = require("../models/Category");
 const Invoice = require("../models/Invoice");
 const PromoCode = require("../models/PromoCode");
-const { adminAuth } = require("../middleware/adminAuth");
+const Admin = require("../models/Admin");
+const { adminAuth, superAdminOnly } = require("../middleware/adminAuth");
 const {
   getInvoiceSignedUrl,
   buildInvoicePdfFromSnapshot,
@@ -27,6 +28,108 @@ const {
   cancelShiprocketShipment,
   initiateZwitchRefund,
 } = require("../utils/orderOperations");
+
+// ——— Admin users (super-admin only) ———
+router.get("/admins", adminAuth, superAdminOnly, async (req, res) => {
+  try {
+    const admins = await Admin.find().select("-password").sort({ createdAt: -1 });
+    res.json(admins.map((a) => ({
+      id: a._id,
+      username: a.username,
+      email: a.email,
+      role: a.role || "secondary-admin",
+      createdAt: a.createdAt,
+    })));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.post("/admins", adminAuth, superAdminOnly, async (req, res) => {
+  try {
+    const { username, password, email } = req.body;
+
+    // Option 1: Add by email only (user will sign in with Google later)
+    if (email) {
+      const normalizedEmail = String(email).toLowerCase().trim();
+      if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+        return res.status(400).json({ message: "Valid email is required" });
+      }
+      const existingByEmail = await Admin.findOne({ email: normalizedEmail });
+      if (existingByEmail) {
+        return res.status(400).json({ message: "An admin with this email already exists" });
+      }
+      const usernameFromEmail = normalizedEmail.replace(/@.*$/, "").replace(/[^a-z0-9]/gi, "_").toLowerCase() || "admin";
+      let uniqueUsername = usernameFromEmail;
+      let suffix = 0;
+      while (await Admin.findOne({ username: uniqueUsername })) {
+        uniqueUsername = `${usernameFromEmail}${++suffix}`;
+      }
+      const admin = new Admin({
+        username: uniqueUsername,
+        email: normalizedEmail,
+        password: require("crypto").randomBytes(32).toString("hex"),
+        role: "secondary-admin",
+      });
+      await admin.save();
+      return res.status(201).json({
+        admin: {
+          id: admin._id,
+          username: admin.username,
+          email: admin.email,
+          role: admin.role,
+          createdAt: admin.createdAt,
+        },
+      });
+    }
+
+    // Option 2: Add by username and password
+    if (!username || !password) {
+      return res.status(400).json({ message: "Username and password are required, or provide email for Google login" });
+    }
+    const existing = await Admin.findOne({ username: username.trim() });
+    if (existing) {
+      return res.status(400).json({ message: "Username already exists" });
+    }
+    const admin = new Admin({
+      username: username.trim(),
+      password,
+      role: "secondary-admin",
+    });
+    await admin.save();
+    res.status(201).json({
+      admin: {
+        id: admin._id,
+        username: admin.username,
+        email: admin.email,
+        role: admin.role,
+        createdAt: admin.createdAt,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.delete("/admins/:id", adminAuth, superAdminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (req.admin._id.toString() === id) {
+      return res.status(400).json({ message: "You cannot remove yourself" });
+    }
+    const target = await Admin.findById(id);
+    if (!target) {
+      return res.status(404).json({ message: "Admin not found" });
+    }
+    if (target.role === "super-admin") {
+      return res.status(403).json({ message: "Cannot remove a super-admin" });
+    }
+    await Admin.findByIdAndDelete(id);
+    res.json({ message: "Admin removed" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
 
 // Get all orders (admin only)
 router.get("/orders", adminAuth, async (req, res) => {

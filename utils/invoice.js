@@ -169,7 +169,7 @@ async function buildInvoiceData(order) {
  * Generate GST-compliant invoice PDF and return buffer
  */
 function formatMoney(value) {
-  return `₹${Number(value || 0).toFixed(2)}`;
+  return `Rs. ${Number(value || 0).toFixed(2)}`;
 }
 
 async function buildInvoicePdf(order, invoiceNumber, invoiceData) {
@@ -322,6 +322,11 @@ async function buildInvoicePdf(order, invoiceNumber, invoiceData) {
     doc.text(formatMoney(invoiceData.igst), left + 140, summaryTop + 72, { width: 70, align: "right" });
 
     const totalsX = left + leftBoxWidth + cardGap + 16;
+    const invoiceTotalLabelWidth = 118;
+    const invoiceTotalValueX = totalsX + invoiceTotalLabelWidth;
+    const invoiceTotalValueWidth = rightBoxWidth - 40 - invoiceTotalLabelWidth;
+    const invoiceTotalRowHeight = 20;
+
     doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Invoice Total", totalsX, summaryTop + 14);
     const totalRows = [
       ["Taxable Amount", formatMoney(invoiceData.subtotal)],
@@ -329,41 +334,31 @@ async function buildInvoicePdf(order, invoiceNumber, invoiceData) {
       ["Shipping Charges", formatMoney(invoiceData.shippingCharge)],
     ];
     totalRows.forEach(([label, value], index) => {
-      const y = summaryTop + 40 + index * 18;
-      doc.fillColor(labelColor).font("Helvetica").fontSize(10).text(label, totalsX, y);
-      doc.fillColor(dark).font("Helvetica-Bold").text(value, totalsX + 160, y, {
-        width: rightBoxWidth - 40 - 160,
+      const y = summaryTop + 40 + index * invoiceTotalRowHeight;
+      doc.fillColor(labelColor).font("Helvetica").fontSize(10).text(label, totalsX, y, { width: invoiceTotalLabelWidth - 4 });
+      doc.fillColor(dark).font("Helvetica-Bold").fontSize(10).text(value, invoiceTotalValueX, y, {
+        width: invoiceTotalValueWidth,
         align: "right",
       });
     });
-    doc.moveTo(totalsX, summaryTop + 95).lineTo(left + pageWidth - 16, summaryTop + 95).strokeColor(border).stroke();
-    doc.fillColor(accent).font("Helvetica-Bold").fontSize(12).text("Grand Total", totalsX, summaryTop + 104);
-    doc.text(formatMoney(invoiceData.grandTotal), totalsX + 160, summaryTop + 104, {
-      width: rightBoxWidth - 40 - 160,
+    const grandTotalY = summaryTop + 40 + totalRows.length * invoiceTotalRowHeight;
+    doc.moveTo(totalsX, grandTotalY - 4).lineTo(left + pageWidth - 16, grandTotalY - 4).strokeColor(border).stroke();
+    doc.fillColor(accent).font("Helvetica-Bold").fontSize(12).text("Grand Total", totalsX, grandTotalY + 6);
+    doc.fillColor(dark).font("Helvetica-Bold").fontSize(10).text(formatMoney(invoiceData.grandTotal), invoiceTotalValueX, grandTotalY + 6, {
+      width: invoiceTotalValueWidth,
       align: "right",
     });
 
-    // Keep Declaration block (Amount in Words + Declaration footer) together on one page
-    const wordsBoxHeight = 58;
-    const wordsToFooterGap = 18;
+    // Declaration block (no Amount in Words)
     const footerBoxHeight = 96;
-    const declarationBlockHeight = wordsBoxHeight + wordsToFooterGap + footerBoxHeight;
     const pageBottom = doc.page.height - doc.page.margins.bottom;
-    let wordsTop;
     let footerTop;
-    if (summaryTop + 142 + declarationBlockHeight > pageBottom) {
+    if (summaryTop + 142 + footerBoxHeight > pageBottom) {
       doc.addPage({ size: "A4", margin: 50 });
-      wordsTop = doc.page.margins.top;
-      footerTop = wordsTop + wordsBoxHeight + wordsToFooterGap;
+      footerTop = doc.page.margins.top;
     } else {
-      wordsTop = summaryTop + 142;
-      footerTop = wordsTop + wordsBoxHeight + wordsToFooterGap;
+      footerTop = summaryTop + 142;
     }
-
-    doc.roundedRect(left, wordsTop, pageWidth, wordsBoxHeight, 10).fillAndStroke("#ffffff", border);
-    doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Amount in Words", left + 16, wordsTop + 14);
-    doc.fillColor(dark).font("Helvetica-Oblique").fontSize(10)
-      .text(amountToWords(invoiceData.grandTotal), left + 16, wordsTop + 32, { width: pageWidth - 32 });
 
     doc.roundedRect(left, footerTop, pageWidth, footerBoxHeight, 10).fillAndStroke("#ffffff", border);
     doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Declaration", left + 16, footerTop + 14);

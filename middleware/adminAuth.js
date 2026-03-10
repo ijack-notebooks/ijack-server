@@ -34,4 +34,11 @@ const adminAuth = async (req, res, next) => {
   }
 };
 
-module.exports = { adminAuth, JWT_SECRET };
+const superAdminOnly = (req, res, next) => {
+  if (req.admin?.role !== "super-admin") {
+    return res.status(403).json({ message: "Only super-admin can manage admin users" });
+  }
+  next();
+};
+
+module.exports = { adminAuth, superAdminOnly, JWT_SECRET };
