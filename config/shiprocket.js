@@ -7,6 +7,8 @@
 
 const SHIPROCKET_EMAIL = process.env.SHIPROCKET_EMAIL;
 const SHIPROCKET_PASSWORD = process.env.SHIPROCKET_PASSWORD;
+const SHIPROCKET_PICKUP_LOCATION = process.env.SHIPROCKET_PICKUP_LOCATION;
+const SHIPROCKET_WEBHOOK_SECRET = process.env.SHIPROCKET_WEBHOOK_SECRET || "";
 const SHIPROCKET_BASE_URL = "https://apiv2.shiprocket.in";
 
 // When true, no real API calls; mock responses so you can test the admin flow without creating real shipments.
@@ -14,6 +16,7 @@ const SHIPROCKET_TEST_MODE = process.env.SHIPROCKET_TEST_MODE === "true" || proc
 
 let cachedToken = null;
 let tokenExpiry = null;
+let cachedPickupLocation = SHIPROCKET_PICKUP_LOCATION || null;
 const TOKEN_VALIDITY_MS = 9 * 24 * 60 * 60 * 1000; // 9 days (refresh before 10-day expiry)
 
 function isTestMode() {
@@ -71,11 +74,34 @@ async function shiprocketFetch(path, options = {}) {
   return json;
 }
 
+async function getPickupLocation() {
+  if (SHIPROCKET_TEST_MODE) return "test-pickup";
+  if (cachedPickupLocation) return cachedPickupLocation;
+
+  const data = await shiprocketFetch("/v1/external/settings/company/pickup");
+  const pickupLocations = data?.data?.shipping_address;
+  const firstPickupLocation = Array.isArray(pickupLocations)
+    ? pickupLocations.find((location) => location?.pickup_location)?.pickup_location
+    : null;
+
+  if (!firstPickupLocation) {
+    throw new Error(
+      "No Shiprocket pickup location found. Add a pickup address in Shiprocket or set SHIPROCKET_PICKUP_LOCATION in server .env",
+    );
+  }
+
+  cachedPickupLocation = firstPickupLocation;
+  return cachedPickupLocation;
+}
+
 module.exports = {
   SHIPROCKET_BASE_URL,
+  SHIPROCKET_PICKUP_LOCATION,
+  SHIPROCKET_WEBHOOK_SECRET,
   SHIPROCKET_TEST_MODE,
   isTestMode,
   isConfigured,
   getToken,
+  getPickupLocation,
   shiprocketFetch,
 };

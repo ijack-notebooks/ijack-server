@@ -7,7 +7,12 @@ const express = require("express");
 const router = express.Router();
 const Order = require("../models/Order");
 const { adminAuth } = require("../middleware/adminAuth");
-const { isConfigured, isTestMode, shiprocketFetch } = require("../config/shiprocket");
+const {
+  getPickupLocation,
+  isConfigured,
+  isTestMode,
+  shiprocketFetch,
+} = require("../config/shiprocket");
 const { updateOrderInSupabase } = require("../utils/supabaseOrders");
 
 // Default package weight in kg (notebooks; minimum chargeable is 0.5 kg)
@@ -55,6 +60,12 @@ router.post("/create-order", adminAuth, async (req, res) => {
       });
     }
 
+    if (order.status === "cancelled" || order.payment?.refundedAt) {
+      return res.status(400).json({
+        message: "Cannot create shipment for a cancelled or refunded order.",
+      });
+    }
+
     // Test mode: mock response, no real API call
     if (isTestMode()) {
       const mockOrderId = 90000000 + Math.floor(Math.random() * 999999);
@@ -82,42 +93,70 @@ router.post("/create-order", adminAuth, async (req, res) => {
     const nameParts = (order.contactDetails?.name || "Customer").trim().split(" ");
     const firstName = nameParts[0] || "Customer";
     const lastName = nameParts.slice(1).join(" ") || "";
+    const pickupLocation = await getPickupLocation();
+    const billingPhone =
+      String(order.contactDetails?.phone || "")
+        .replace(/\D/g, "")
+        .slice(-10) || "9999999999";
+    const billingPincode = String(order.address?.zipCode || "").replace(/\D/g, "").slice(0, 6);
 
-    const orderItems = order.items.map((item) => ({
+    const items = Array.isArray(order.items) ? order.items : [];
+    if (!items.length) {
+      return res.status(400).json({ message: "Cannot create shipment for an order with no items." });
+    }
+
+    if (!billingPincode || billingPincode.length !== 6) {
+      return res.status(400).json({
+        message: "Order address must include a valid 6-digit pincode before creating shipment.",
+      });
+    }
+
+    if (!billingPhone || billingPhone.length !== 10) {
+      return res.status(400).json({
+        message: "Order contact must include a valid 10-digit phone number before creating shipment.",
+      });
+    }
+
+    const orderItems = items.map((item) => ({
       name: item.notebook?.name || "Notebook",
       sku: item.notebook?._id?.toString() || `item-${item._id}`,
-      units: item.quantity,
-      unit_price: Number(item.price),
+      units: Number(item.quantity) || 1,
+      unit_price: Number(item.price) || 0,
+      selling_price: Number(item.price) || 0,
     }));
 
+    const orderDate = order.createdAt
+      ? new Date(order.createdAt).toISOString().split("T")[0]
+      : new Date().toISOString().split("T")[0];
     const payload = {
       order_id: order.payment?.merchantOrderId || order._id.toString(),
-      order_date: new Date(order.createdAt).toISOString().split("T")[0],
+      order_date: orderDate,
+      pickup_location: pickupLocation,
       channel_id: "",
       billing_customer_name: firstName,
       billing_last_name: lastName,
       billing_address: order.address?.street || "Address",
       billing_address_2: "",
       billing_city: order.address?.city || "",
-      billing_pincode: String(order.address?.zipCode || "").replace(/\s/g, ""),
+      billing_pincode: billingPincode,
       billing_state: order.address?.state || "",
       billing_country: order.address?.country || "India",
       billing_email: order.contactDetails?.email || order.user?.email || "",
-      billing_phone: String(order.contactDetails?.phone || "").replace(/\D/g, "").slice(0, 10) || "9999999999",
+      billing_phone: billingPhone,
       shipping_is_billing: 1,
       shipping_customer_name: firstName,
       shipping_last_name: lastName,
       shipping_address: order.address?.street || "Address",
       shipping_address_2: "",
       shipping_city: order.address?.city || "",
-      shipping_pincode: String(order.address?.zipCode || "").replace(/\s/g, ""),
+      shipping_pincode: billingPincode,
       shipping_state: order.address?.state || "",
       shipping_country: order.address?.country || "India",
-      shipping_phone: String(order.contactDetails?.phone || "").replace(/\D/g, "").slice(0, 10) || "9999999999",
+      shipping_phone: billingPhone,
       shipping_email: order.contactDetails?.email || order.user?.email || "",
       order_items: orderItems,
       payment_method: order.payment?.paymentStatus === "SUCCESS" ? "Prepaid" : "COD",
-      sub_total: order.totalAmount,
+      sub_total: Number(order.totalAmount) || 0,
       length: DEFAULT_LENGTH,
       breadth: DEFAULT_BREADTH,
       height: DEFAULT_HEIGHT,
@@ -130,8 +169,11 @@ router.post("/create-order", adminAuth, async (req, res) => {
       body: JSON.stringify(payload),
     });
 
-    const srOrderId = data.order_id;
-    const shipmentId = data.shipment_id ?? data.id;
+    const srOrderId = data?.order_id;
+    const shipmentId = data?.shipment_id ?? data?.id;
+    if (srOrderId == null) {
+      throw new Error(data?.message || data?.error || "Shiprocket did not return order_id");
+    }
 
     order.shiprocket = {
       orderId: srOrderId,
@@ -154,11 +196,19 @@ router.post("/create-order", adminAuth, async (req, res) => {
       order: order,
     });
   } catch (error) {
-    console.error("Shiprocket create order error:", error);
-    res.status(error.status || 500).json({
-      message: error.message || "Failed to create order in Shiprocket",
-      error: error.response || undefined,
-    });
+    console.error("Shiprocket create order error:", error?.message || error);
+    if (error?.stack) console.error(error.stack);
+    const status = error.status || 500;
+    const message = error?.message ? String(error.message) : "Failed to create order in Shiprocket";
+    const body = { message };
+    if (error?.response && typeof error.response === "object" && !Array.isArray(error.response)) {
+      try {
+        body.details = JSON.parse(JSON.stringify(error.response));
+      } catch (_) {
+        body.details = String(error.response?.message || error.response?.error || "Unknown API error");
+      }
+    }
+    res.status(status).json(body);
   }
 });
 
@@ -209,8 +259,29 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
       }),
     });
 
-    const awbCode = data.awb_code ?? data.awb;
-    const courierName = data.courier_name ?? data.courier ?? "";
+    const responseData = data?.response?.data || {};
+    const directAwbCode = data?.awb_code ?? data?.awb;
+    const nestedAwbCode = responseData?.awb_code ?? responseData?.awb;
+    const assignError = responseData?.awb_assign_error || data?.message || data?.error || "";
+    const alreadyAssignedMatch =
+      typeof assignError === "string"
+        ? assignError.match(/awb\s*-\s*([A-Z0-9]+)/i)
+        : null;
+    const awbCode = directAwbCode || nestedAwbCode || alreadyAssignedMatch?.[1] || null;
+    const courierName =
+      data?.courier_name ??
+      data?.courier ??
+      responseData?.courier_name ??
+      responseData?.courier ??
+      (responseData?.courier_id ? `Courier #${responseData.courier_id}` : "");
+
+    if (!awbCode) {
+      const message =
+        typeof assignError === "string" && assignError
+          ? assignError
+          : "Shiprocket did not return an AWB number";
+      return res.status(422).json({ message });
+    }
 
     if (!order.shiprocket) order.shiprocket = {};
     order.shiprocket.awbCode = awbCode;
@@ -226,11 +297,19 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
       order: order,
     });
   } catch (error) {
-    console.error("Shiprocket assign AWB error:", error);
-    res.status(error.status || 500).json({
-      message: error.message || "Failed to assign AWB",
-      error: error.response || undefined,
-    });
+    console.error("Shiprocket assign AWB error:", error?.message || error);
+    if (error?.stack) console.error(error.stack);
+    const status = error.status || 500;
+    const message = error?.message ? String(error.message) : "Failed to assign AWB";
+    const body = { message };
+    if (error?.response && typeof error.response === "object" && !Array.isArray(error.response)) {
+      try {
+        body.details = JSON.parse(JSON.stringify(error.response));
+      } catch (_) {
+        body.details = String(error.response?.message || error.response?.error || "Unknown API error");
+      }
+    }
+    res.status(status).json(body);
   }
 });
 
@@ -381,7 +460,8 @@ router.get("/track/:awb", adminAuth, async (req, res) => {
   }
 });
 
-// Cancel Shiprocket order (removes from Shiprocket; clears shiprocket data on our order)
+// Cancel Shiprocket order (removes from Shiprocket; clears shiprocket data on our order).
+// If a pickup was scheduled, cancel it first (Shiprocket does not auto-cancel pickup when order is cancelled).
 router.post("/cancel", adminAuth, async (req, res) => {
   try {
     if (!isConfigured()) {
@@ -399,6 +479,7 @@ router.post("/cancel", adminAuth, async (req, res) => {
     }
 
     const srOrderId = order.shiprocket?.orderId;
+    const shipmentId = order.shiprocket?.shipmentId;
     if (!srOrderId) {
       return res.status(400).json({ message: "No Shiprocket shipment found for this order" });
     }
@@ -410,6 +491,19 @@ router.post("/cancel", adminAuth, async (req, res) => {
         message: "[TEST MODE] Shipment cancelled (mock)",
         order: updated,
       });
+    }
+
+    // Cancel scheduled pickup first (if any). Shiprocket does not auto-cancel pickup when order is cancelled.
+    if (shipmentId) {
+      try {
+        await shiprocketFetch("/v1/external/courier/cancel/pickup", {
+          method: "POST",
+          body: JSON.stringify({ shipment_id: [Number(shipmentId)] }),
+        });
+      } catch (pickupErr) {
+        // Pickup may not have been requested, or already picked up; still proceed with order cancel
+        console.warn("Shiprocket cancel pickup (optional):", pickupErr.message);
+      }
     }
 
     const data = await shiprocketFetch("/v1/external/orders/cancel", {

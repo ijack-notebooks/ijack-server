@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const path = require("path");
 const fs = require("fs");
+const axios = require("axios");
 const Order = require("../models/Order");
 const User = require("../models/User");
 const Notebook = require("../models/Notebook");
@@ -275,6 +276,110 @@ router.patch("/orders/:id/status", adminAuth, async (req, res) => {
     res.json(order);
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+});
+
+// Cancel order (set status to cancelled; optionally cancel Shiprocket shipment)
+router.post("/orders/:id/cancel", adminAuth, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id)
+      .populate("user", "username email")
+      .populate("items.notebook");
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    if (order.status === "cancelled") {
+      return res.status(400).json({ message: "Order is already cancelled" });
+    }
+    order.status = "cancelled";
+    await order.save();
+    updateOrderInSupabase(order._id.toString(), { status: "cancelled" }).catch((err) =>
+      console.error("Failed to update order in Supabase:", err)
+    );
+    // If Shiprocket shipment exists, cancel pickup (if scheduled) then cancel order
+    if (order.shiprocket?.orderId) {
+      try {
+        const { isConfigured, isTestMode, shiprocketFetch } = require("../config/shiprocket");
+        if (isConfigured() && !isTestMode()) {
+          const shipmentId = order.shiprocket.shipmentId;
+          if (shipmentId) {
+            try {
+              await shiprocketFetch("/v1/external/courier/cancel/pickup", {
+                method: "POST",
+                body: JSON.stringify({ shipment_id: [Number(shipmentId)] }),
+              });
+            } catch (pickupErr) {
+              console.warn("Shiprocket cancel pickup (optional):", pickupErr.message);
+            }
+          }
+          await shiprocketFetch("/v1/external/orders/cancel", {
+            method: "POST",
+            body: JSON.stringify({ ids: [Number(order.shiprocket.orderId)] }),
+          });
+        }
+        await Order.findByIdAndUpdate(order._id, { $unset: { shiprocket: "" } });
+      } catch (srErr) {
+        console.error("Shiprocket cancel failed:", srErr.message);
+      }
+    }
+    const updated = await Order.findById(req.params.id)
+      .populate("user", "username email")
+      .populate("items.notebook");
+    res.json(updated);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Refund order via ZWITCH (https://developers.zwitch.io/reference/create-upi-refund)
+router.post("/orders/:id/refund", adminAuth, async (req, res) => {
+  try {
+    const ZWITCH_PG_ACCESS_KEY = process.env.ZWITCH_PG_ACCESS_KEY;
+    const ZWITCH_PG_SECRET_KEY = process.env.ZWITCH_PG_SECRET_KEY;
+    if (!ZWITCH_PG_ACCESS_KEY || !ZWITCH_PG_SECRET_KEY) {
+      return res.status(503).json({ message: "ZWITCH payment gateway is not configured" });
+    }
+
+    const order = await Order.findById(req.params.id)
+      .populate("user", "username email")
+      .populate("items.notebook");
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    if (order.payment?.paymentStatus !== "SUCCESS") {
+      return res.status(400).json({ message: "Only successfully paid orders can be refunded" });
+    }
+    if (order.payment?.refundedAt) {
+      return res.status(400).json({ message: "This order has already been refunded" });
+    }
+
+    const paymentId = order.payment?.paymentTransactionId || order.payment?.phonepeTransactionId;
+    if (!paymentId) {
+      return res.status(400).json({ message: "No payment transaction ID found for this order" });
+    }
+
+    const merchantRef = "refund_" + order._id.toString().replace(/[^a-zA-Z0-9]/g, "").slice(0, 32);
+    const authHeader = { Authorization: `Bearer ${ZWITCH_PG_ACCESS_KEY}:${ZWITCH_PG_SECRET_KEY}` };
+
+    const refundRes = await axios.post(
+      "https://api.zwitch.io/v1/payments/upi/refund",
+      { id: paymentId, merchant_reference_id: merchantRef },
+      { headers: { "Content-Type": "application/json", ...authHeader } }
+    );
+
+    order.payment.refundedAt = new Date();
+    order.status = "cancelled";
+    await order.save();
+    updateOrderInSupabase(order._id.toString(), { status: "cancelled" }).catch(() => {});
+
+    res.json({
+      message: "Refund initiated successfully",
+      refund: refundRes.data,
+      order,
+    });
+  } catch (error) {
+    const msg = error.response?.data?.error?.message || error.response?.data?.message || error.message;
+    res.status(error.response?.status || 500).json({ message: msg || "Refund failed" });
   }
 });
 

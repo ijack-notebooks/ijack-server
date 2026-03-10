@@ -120,7 +120,13 @@ npm run cleanup-images
 ```env
 SHIPROCKET_EMAIL=your-api-user-email@example.com
 SHIPROCKET_PASSWORD=your-api-user-password
+SHIPROCKET_PICKUP_LOCATION=your-saved-pickup-location-name
+SHIPROCKET_WEBHOOK_SECRET=your-random-webhook-secret
 ```
+- Real-time updates webhook endpoint: `POST /api/delivery/webhook` (URL must not contain shiprocket, kartrocket, sr, or kr per Shiprocket’s rules).
+- If you set `SHIPROCKET_WEBHOOK_SECRET`, configure the same value in Shiprocket as a custom header:
+  - Header name: `x-shiprocket-webhook-secret`
+  - Header value: your `SHIPROCKET_WEBHOOK_SECRET`
 
 ### Health
 - `GET /` - Welcome message

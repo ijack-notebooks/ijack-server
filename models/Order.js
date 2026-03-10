@@ -94,6 +94,10 @@ const OrderSchema = new mongoose.Schema({
     amount: {
       type: Number,
     },
+    refundedAt: {
+      type: Date,
+      default: null,
+    },
   },
   invoiceNumber: {
     type: String,
@@ -116,6 +120,7 @@ const OrderSchema = new mongoose.Schema({
     labelUrl: { type: String },
     trackingStatus: { type: String },
     trackingUrl: { type: String },
+    lastWebhookAt: { type: Date },
     createdAt: { type: Date, default: Date.now },
   },
   createdAt: {

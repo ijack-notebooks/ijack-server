@@ -48,10 +48,19 @@ On the **server** (where `ijack-server` runs), add to `.env`:
 ```env
 SHIPROCKET_EMAIL=your-api-user-email@example.com
 SHIPROCKET_PASSWORD=your-api-user-password
+SHIPROCKET_PICKUP_LOCATION=your-saved-pickup-location-name
+SHIPROCKET_WEBHOOK_SECRET=your-random-webhook-secret
 ```
 
 Use the **API user** email and password, not your main Shiprocket login.  
 Restart the server after changing `.env`.
+
+`SHIPROCKET_PICKUP_LOCATION` should match the exact pickup location name saved in Shiprocket, for example `work`.
+
+`SHIPROCKET_WEBHOOK_SECRET` is optional but recommended. If you set it, add the same value as a custom header in Shiprocket webhook settings:
+
+- Header name: `x-shiprocket-webhook-secret`
+- Header value: your `SHIPROCKET_WEBHOOK_SECRET`
 
 #### D. (Optional) Use test mode
 
@@ -206,9 +215,43 @@ Token is cached and refreshed when needed.
 
 ---
 
+## 4.1 Real-time webhook setup
+
+To receive shipment status changes automatically from Shiprocket:
+
+1. Make sure your backend is publicly reachable over HTTPS.
+2. In Shiprocket dashboard, go to **Settings → API → Webhooks**.
+3. Enable the webhook toggle.
+4. Set the webhook URL to:
+
+   - Local testing through a tunnel: `https://your-public-url/api/delivery/webhook`
+   - Production: `https://your-backend-domain/api/delivery/webhook`
+
+   **Note:** Do not use keywords like shiprocket, kartrocket, sr, or kr in the URL (Shiprocket dashboard restriction). This endpoint uses `/api/delivery/webhook` for that reason.
+
+5. If you set `SHIPROCKET_WEBHOOK_SECRET` in `.env`, add this custom header in Shiprocket:
+
+   - `x-shiprocket-webhook-secret: <your secret>`
+
+6. Save the webhook.
+
+What the webhook updates in our app:
+
+- `order.shiprocket.trackingStatus`
+- `order.shiprocket.trackingUrl`
+- `order.shiprocket.awbCode`
+- `order.shiprocket.courierName`
+- `order.shiprocket.lastWebhookAt`
+- `order.status` when the shipment clearly maps to `shipped`, `delivered`, or `cancelled`
+
+The admin **Orders** and **Shipments** pages will then show the latest webhook-fed shipment status.
+
+---
+
 ## 5. Backend details
 
 - **Config:** `config/shiprocket.js` – reads `SHIPROCKET_EMAIL` and `SHIPROCKET_PASSWORD`, gets and caches token.
+- **Public webhook route:** `POST /api/delivery/webhook` – receives real-time shipment updates from Shiprocket and updates matching orders in MongoDB. (Path avoids shiprocket/kartrocket/sr/kr in URL per Shiprocket’s webhook field rules.)
 - **Routes:** `routes/shiprocket.js` – all under `/api/admin/shiprocket/*`, admin-only:
   - `GET /config` – whether Shiprocket is configured.
   - `POST /create-order` – body `{ orderId }` (our MongoDB order `_id`).
@@ -216,6 +259,7 @@ Token is cached and refreshed when needed.
   - `POST /generate-label` – body `{ orderId }`.
   - `POST /generate-pickup` – body `{ orderId }`.
   - `GET /track/:awb` – track by AWB.
+  - `POST /cancel` – body `{ orderId }`. Cancels any scheduled pickup first (if shipment has one), then cancels the Shiprocket order. Shiprocket does not auto-cancel pickup when the order is cancelled.
 - **Order model:** Each order can have `shiprocket` with `orderId`, `shipmentId`, `awbCode`, `courierName`, `labelUrl`, etc.
 
 Default package weight used for Shiprocket is **0.5 kg** (minimum chargeable). You can change `DEFAULT_WEIGHT_KG`, `DEFAULT_LENGTH`, `DEFAULT_BREADTH`, `DEFAULT_HEIGHT` in `routes/shiprocket.js` if needed.
