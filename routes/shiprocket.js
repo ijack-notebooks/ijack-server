@@ -185,9 +185,12 @@ router.post("/create-order", adminAuth, async (req, res) => {
       trackingUrl: null,
       createdAt: new Date(),
     };
+    if (order.status === "pending") {
+      order.status = "processing";
+    }
     await order.save();
 
-    updateOrderInSupabase(order._id.toString(), {}).catch(() => {});
+    updateOrderInSupabase(order._id.toString(), { status: order.status }).catch(() => {});
 
     res.json({
       message: "Order created in Shiprocket",
