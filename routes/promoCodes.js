@@ -2,27 +2,37 @@ const express = require("express");
 const router = express.Router();
 const PromoCode = require("../models/PromoCode");
 
+// Date-only comparison in UTC: "valid until Y" includes the whole day Y.
+function startOfDayUTC(d) {
+  const x = new Date(d);
+  return new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate()));
+}
+function endOfDayUTC(d) {
+  const s = startOfDayUTC(d);
+  return new Date(s.getTime() + 24 * 60 * 60 * 1000 - 1);
+}
+
 /**
  * List currently valid promo codes (for display on checkout).
  * Public route; returns only active codes within valid date range.
+ * Uses date-only UTC comparison so "valid until Dec 31" includes all of Dec 31.
  */
 router.get("/available", async (req, res) => {
   try {
     const now = new Date();
-    const codes = await PromoCode.find({
-      active: true,
-      $and: [
-        { $or: [{ validFrom: { $lte: now } }, { validFrom: null }] },
-        { $or: [{ validUntil: { $gte: now } }, { validUntil: null }] },
-      ],
-    })
+    const startTodayUTC = startOfDayUTC(now);
+    const endTodayUTC = endOfDayUTC(now);
+
+    const codes = await PromoCode.find({ active: true })
       .select("code type value minOrderAmount validFrom validUntil maxUses usedCount")
       .lean();
 
     const valid = codes.filter((p) => {
-      if (p.validFrom && new Date(p.validFrom) > now) return false;
-      if (p.validUntil && new Date(p.validUntil) < now) return false;
       if (p.maxUses != null && (p.usedCount || 0) >= p.maxUses) return false;
+      const from = p.validFrom ? new Date(p.validFrom) : null;
+      const until = p.validUntil ? new Date(p.validUntil) : null;
+      if (from && from > endTodayUTC) return false; // not yet valid (validFrom is in the future)
+      if (until && endOfDayUTC(until) < startTodayUTC) return false; // expired (validUntil day is before today)
       return true;
     });
 
