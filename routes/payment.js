@@ -31,6 +31,16 @@ const getZwitchAuthHeader = () => {
   return { Authorization: `Bearer ${credentials}` };
 };
 
+// ZWITCH expects contact_number as 10-digit Indian mobile (e.g. "9876543210"). Normalize user input.
+function normalizeContactNumberForZwitch(phone) {
+  if (phone == null || typeof phone !== "string") return null;
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length === 10) return digits;
+  if (digits.length === 11 && digits.startsWith("0")) return digits.slice(1);
+  if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
+  return null;
+}
+
 // Normalize ZWITCH payment mode to stored payment method (upi | netbanking | card).
 // Ref: https://developers.zwitch.io/reference/response-parameters
 function normalizePaymentMethod(rawTypeName) {
@@ -92,6 +102,13 @@ router.post("/initiate", auth, async (req, res) => {
 
     if (!contactDetails || !address) {
       return res.status(400).json({ message: "Contact details and address are required" });
+    }
+
+    const contactNumberForZwitch = normalizeContactNumberForZwitch(contactDetails.phone);
+    if (!contactNumberForZwitch) {
+      return res.status(400).json({
+        message: "Please enter a valid 10-digit Indian mobile number (e.g. 9876543210).",
+      });
     }
 
     const categoryDocs = await Category.find({}).select("name gstPercentage").lean();
@@ -198,11 +215,11 @@ router.post("/initiate", auth, async (req, res) => {
       }
     })();
 
-    // Create ZWITCH payment token for Layer.js
+    // Create ZWITCH payment token for Layer.js (contact_number must be 10-digit Indian mobile)
     const tokenPayload = {
       amount: totalAmount,
-      contact_number: contactDetails.phone || "",
-      email_id: contactDetails.email || "",
+      contact_number: contactNumberForZwitch,
+      email_id: (contactDetails.email || "").trim(),
       currency: "INR",
       mtx: merchantOrderId,
     };
