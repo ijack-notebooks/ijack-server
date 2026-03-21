@@ -10,6 +10,10 @@ const { auth } = require("../middleware/auth");
 const { storeOrderInSupabase, updateOrderInSupabase } = require("../utils/supabaseOrders");
 const { generateAndSendInvoice } = require("../utils/invoice");
 const { appendPaymentHistory } = require("../utils/paymentHistory");
+const {
+  isConfigured: isShiprocketConfigured,
+  shiprocketFetch,
+} = require("../config/shiprocket");
 
 // ZWITCH Configuration (Layer Payment Gateway)
 // https://developers.zwitch.io/reference
@@ -20,6 +24,12 @@ const ZWITCH_WEBHOOK_SECRET = process.env.ZWITCH_WEBHOOK_SIGNING_SECRET;
 
 const ZWITCH_BASE = "https://api.zwitch.io";
 const ZWITCH_PG_PATH = ZWITCH_ENV === "production" ? "/v1/pg" : "/v1/pg/sandbox";
+const DEFAULT_WEIGHT_KG = 0.5;
+const DEFAULT_LENGTH_CM = 25;
+const DEFAULT_BREADTH_CM = 20;
+const DEFAULT_HEIGHT_CM = 0.8;
+/** Fixed pickup pincode for Shiprocket serviceability / shipping quotes */
+const PICKUP_PINCODE = "530007";
 
 // Generate unique merchant order ID (used as mtx in ZWITCH)
 const generateMerchantOrderId = () => {
@@ -39,6 +49,67 @@ function normalizeContactNumberForZwitch(phone) {
   if (digits.length === 11 && digits.startsWith("0")) return digits.slice(1);
   if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
   return null;
+}
+
+function normalizePincode(value) {
+  return String(value || "").replace(/\D/g, "").slice(0, 6);
+}
+
+function safePositiveNumber(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function getPickupPincodeForShipping() {
+  return PICKUP_PINCODE;
+}
+
+async function fetchShiprocketCourierOptions({
+  pickupPincode,
+  deliveryPincode,
+  weightKg,
+  lengthCm,
+  breadthCm,
+  heightCm,
+  cod = 0,
+  shipmentValue = 0,
+}) {
+  const params = new URLSearchParams({
+    pickup_postcode: String(pickupPincode),
+    delivery_postcode: String(deliveryPincode),
+    weight: String(weightKg),
+    cod: String(cod ? 1 : 0),
+    length: String(lengthCm),
+    breadth: String(breadthCm),
+    height: String(heightCm),
+    declared_value: String(Math.max(0, Number(shipmentValue) || 0)),
+  });
+  const data = await shiprocketFetch(`/v1/external/courier/serviceability/?${params.toString()}`, {
+    method: "GET",
+  });
+  const rows = data?.data?.available_courier_companies || data?.available_courier_companies || [];
+  return rows
+    .map((row) => {
+      const courierCompanyId = Number(row?.courier_company_id ?? row?.id ?? 0);
+      const courierName =
+        row?.courier_name || row?.courier_company_name || row?.name || "Courier";
+      const rate = Number(
+        row?.freight_charge ??
+          row?.rate ??
+          row?.courier_charge ??
+          row?.total_charge ??
+          row?.cod_charges,
+      );
+      const etdDays = row?.estimated_delivery_days || row?.etd || row?.eta || null;
+      return {
+        courierCompanyId,
+        courierName,
+        rate: Number.isFinite(rate) && rate > 0 ? rate : null,
+        etdDays: etdDays != null ? String(etdDays) : null,
+      };
+    })
+    .filter((x) => x.rate != null)
+    .sort((a, b) => a.rate - b.rate);
 }
 
 // Normalize ZWITCH payment mode to stored payment method (upi | netbanking | card).
@@ -84,6 +155,92 @@ const verifyZwitchWebhookSignature = (normalizedPayload, signature) => {
   }
 };
 
+// Get shipping courier options from Shiprocket for checkout.
+router.post("/shipping-options", auth, async (req, res) => {
+  try {
+    const { items, deliveryPincode, shipmentValue } = req.body || {};
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: "items are required" });
+    }
+    const normalizedDeliveryPincode = normalizePincode(deliveryPincode);
+    if (!normalizedDeliveryPincode || normalizedDeliveryPincode.length !== 6) {
+      return res.status(400).json({ message: "Valid 6-digit delivery pincode is required" });
+    }
+
+    let totalWeightGrams = 0;
+    let maxLengthCm = 0;
+    let maxBreadthCm = 0;
+    let stackedHeightCm = 0;
+
+    for (const item of items) {
+      const qty = Math.max(1, Number(item.quantity) || 1);
+      const notebook = await Notebook.findById(item.notebookId).select(
+        "weight lengthCm breadthCm heightCm"
+      );
+      if (!notebook) {
+        return res.status(404).json({ message: `Notebook ${item.notebookId} not found` });
+      }
+      totalWeightGrams += (Number(notebook.weight) || 0) * qty;
+      const itemLength = safePositiveNumber(notebook.lengthCm, DEFAULT_LENGTH_CM);
+      const itemBreadth = safePositiveNumber(notebook.breadthCm, DEFAULT_BREADTH_CM);
+      const itemHeight = safePositiveNumber(notebook.heightCm, DEFAULT_HEIGHT_CM);
+      maxLengthCm = Math.max(maxLengthCm, itemLength);
+      maxBreadthCm = Math.max(maxBreadthCm, itemBreadth);
+      stackedHeightCm += itemHeight * qty;
+    }
+
+    const packageData = {
+      weightKg: Math.max(DEFAULT_WEIGHT_KG, Number((totalWeightGrams / 1000).toFixed(3))),
+      lengthCm: Number(Math.max(0.5, maxLengthCm || DEFAULT_LENGTH_CM).toFixed(2)),
+      breadthCm: Number(Math.max(0.5, maxBreadthCm || DEFAULT_BREADTH_CM).toFixed(2)),
+      heightCm: Number(Math.max(0.5, stackedHeightCm || DEFAULT_HEIGHT_CM).toFixed(2)),
+    };
+
+    // If Shiprocket is not configured, return a deterministic fallback.
+    if (!isShiprocketConfigured()) {
+      const fallbackRate = Math.ceil(totalWeightGrams / 500) * 26;
+      return res.json({
+        fallback: true,
+        pickupPincode: PICKUP_PINCODE,
+        deliveryPincode: normalizedDeliveryPincode,
+        package: packageData,
+        options: [
+          {
+            courierCompanyId: 0,
+            courierName: "Standard Shipping",
+            rate: fallbackRate,
+            etdDays: "3-7",
+          },
+        ],
+      });
+    }
+
+    const pickupPincode = getPickupPincodeForShipping();
+    const options = await fetchShiprocketCourierOptions({
+      pickupPincode,
+      deliveryPincode: normalizedDeliveryPincode,
+      weightKg: packageData.weightKg,
+      lengthCm: packageData.lengthCm,
+      breadthCm: packageData.breadthCm,
+      heightCm: packageData.heightCm,
+      cod: 0,
+      shipmentValue: Number(shipmentValue) || 0,
+    });
+    return res.json({
+      fallback: false,
+      pickupPincode,
+      deliveryPincode: normalizedDeliveryPincode,
+      package: packageData,
+      options,
+    });
+  } catch (error) {
+    console.error("Shipping options error:", error?.response || error.message);
+    return res.status(error.status || 500).json({
+      message: error.message || "Failed to fetch shipping options",
+    });
+  }
+});
+
 // Create order and get ZWITCH payment token for Layer.js
 router.post("/initiate", auth, async (req, res) => {
   try {
@@ -94,7 +251,7 @@ router.post("/initiate", auth, async (req, res) => {
       });
     }
 
-    const { items, contactDetails, address } = req.body;
+    const { items, contactDetails, address, shippingOption } = req.body;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: "Order must contain at least one item" });
@@ -118,6 +275,9 @@ router.post("/initiate", auth, async (req, res) => {
 
     let subtotal = 0;
     let totalWeightGrams = 0;
+    let maxLengthCm = 0;
+    let maxBreadthCm = 0;
+    let stackedHeightCm = 0;
     let gstAmount = 0;
     const orderItems = [];
 
@@ -133,6 +293,12 @@ router.post("/initiate", auth, async (req, res) => {
       const itemTotal = notebook.price * item.quantity;
       subtotal += itemTotal;
       totalWeightGrams += (Number(notebook.weight) || 0) * item.quantity;
+      const itemLength = safePositiveNumber(notebook.lengthCm, DEFAULT_LENGTH_CM);
+      const itemBreadth = safePositiveNumber(notebook.breadthCm, DEFAULT_BREADTH_CM);
+      const itemHeight = safePositiveNumber(notebook.heightCm, DEFAULT_HEIGHT_CM);
+      maxLengthCm = Math.max(maxLengthCm, itemLength);
+      maxBreadthCm = Math.max(maxBreadthCm, itemBreadth);
+      stackedHeightCm += itemHeight * item.quantity;
       const gstPct = gstByCategory[notebook.category] ?? 0;
       gstAmount += (itemTotal * gstPct) / 100;
 
@@ -143,7 +309,48 @@ router.post("/initiate", auth, async (req, res) => {
       });
     }
 
-    const shippingCharge = Math.ceil(totalWeightGrams / 500) * 26;
+    const packageData = {
+      weightKg: Math.max(DEFAULT_WEIGHT_KG, Number((totalWeightGrams / 1000).toFixed(3))),
+      lengthCm: Number(Math.max(0.5, maxLengthCm || DEFAULT_LENGTH_CM).toFixed(2)),
+      breadthCm: Number(Math.max(0.5, maxBreadthCm || DEFAULT_BREADTH_CM).toFixed(2)),
+      heightCm: Number(Math.max(0.5, stackedHeightCm || DEFAULT_HEIGHT_CM).toFixed(2)),
+    };
+
+    const normalizedDeliveryPincode = normalizePincode(address?.zipCode);
+    let selectedShipping = null;
+    let shippingCharge = Math.ceil(totalWeightGrams / 500) * 26;
+
+    if (isShiprocketConfigured() && normalizedDeliveryPincode.length === 6) {
+      try {
+        const pickupPincode = getPickupPincodeForShipping();
+        const options = await fetchShiprocketCourierOptions({
+          pickupPincode,
+          deliveryPincode: normalizedDeliveryPincode,
+          weightKg: packageData.weightKg,
+          lengthCm: packageData.lengthCm,
+          breadthCm: packageData.breadthCm,
+          heightCm: packageData.heightCm,
+          cod: 0,
+          shipmentValue: Math.round(subtotal + gstAmount),
+        });
+
+        if (options.length > 0) {
+          const requestedCourierId = Number(shippingOption?.courierCompanyId || 0);
+          selectedShipping =
+            options.find((opt) => requestedCourierId && opt.courierCompanyId === requestedCourierId) ||
+            options[0];
+          shippingCharge = Math.round(selectedShipping.rate);
+          selectedShipping = {
+            ...selectedShipping,
+            pickupPincode,
+            deliveryPincode: normalizedDeliveryPincode,
+          };
+        }
+      } catch (shippingError) {
+        console.warn("Shiprocket shipping quote failed, using fallback shipping:", shippingError.message);
+      }
+    }
+
     const preDiscountTotal = Math.round(subtotal + shippingCharge + gstAmount);
     let totalAmount = preDiscountTotal;
     let discountAmount = 0;
@@ -189,6 +396,18 @@ router.post("/initiate", auth, async (req, res) => {
         paymentStatus: "PENDING",
         amount: totalAmount,
       },
+      shipping: {
+        charge: shippingCharge,
+        courierCompanyId: selectedShipping?.courierCompanyId || null,
+        courierName: selectedShipping?.courierName || null,
+        etdDays: selectedShipping?.etdDays || null,
+        pickupPincode: selectedShipping?.pickupPincode || null,
+        deliveryPincode: selectedShipping?.deliveryPincode || normalizedDeliveryPincode || null,
+        weightKg: packageData.weightKg,
+        lengthCm: packageData.lengthCm,
+        breadthCm: packageData.breadthCm,
+        heightCm: packageData.heightCm,
+      },
     });
 
     appendPaymentHistory(order, {
@@ -198,6 +417,8 @@ router.post("/initiate", auth, async (req, res) => {
       data: {
         amount: totalAmount,
         merchantOrderId,
+        shippingCharge,
+        courier: selectedShipping?.courierName || "Fallback",
       },
     });
 

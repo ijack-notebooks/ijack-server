@@ -497,6 +497,18 @@ router.post("/products", adminAuth, (req, res) => {
         stockQuantity: parseInt(req.body.stockQuantity),
         inStock: req.body.inStock === "true" || req.body.inStock === true,
         weight: req.body.weight != null && req.body.weight !== "" ? Math.max(0, Number(req.body.weight)) : 0,
+        lengthCm:
+          req.body.lengthCm != null && req.body.lengthCm !== ""
+            ? Math.max(0.5, Number(req.body.lengthCm))
+            : 25,
+        breadthCm:
+          req.body.breadthCm != null && req.body.breadthCm !== ""
+            ? Math.max(0.5, Number(req.body.breadthCm))
+            : 20,
+        heightCm:
+          req.body.heightCm != null && req.body.heightCm !== ""
+            ? Math.max(0.5, Number(req.body.heightCm))
+            : 0.8,
       };
 
       // Upload image to Supabase Storage if file was uploaded (no local fallback)
@@ -583,7 +595,22 @@ router.post("/products", adminAuth, (req, res) => {
 // Update product (JSON only, no image)
 router.put("/products/:id", adminAuth, async (req, res) => {
   try {
-    const notebook = await Notebook.findByIdAndUpdate(req.params.id, req.body, {
+    const updateBody = {
+      ...req.body,
+      lengthCm:
+        req.body.lengthCm != null && req.body.lengthCm !== ""
+          ? Math.max(0.5, Number(req.body.lengthCm))
+          : req.body.lengthCm,
+      breadthCm:
+        req.body.breadthCm != null && req.body.breadthCm !== ""
+          ? Math.max(0.5, Number(req.body.breadthCm))
+          : req.body.breadthCm,
+      heightCm:
+        req.body.heightCm != null && req.body.heightCm !== ""
+          ? Math.max(0.5, Number(req.body.heightCm))
+          : req.body.heightCm,
+    };
+    const notebook = await Notebook.findByIdAndUpdate(req.params.id, updateBody, {
       new: true,
       runValidators: true,
     });
@@ -625,6 +652,18 @@ router.patch("/products/:id", adminAuth, (req, res) => {
         size: req.body.size != null ? String(req.body.size).trim() : existing.size,
         stockQuantity: req.body.stockQuantity != null ? parseInt(req.body.stockQuantity, 10) : existing.stockQuantity,
         weight: req.body.weight != null && req.body.weight !== "" ? Math.max(0, Number(req.body.weight)) : (existing.weight ?? 0),
+        lengthCm:
+          req.body.lengthCm != null && req.body.lengthCm !== ""
+            ? Math.max(0.5, Number(req.body.lengthCm))
+            : (existing.lengthCm ?? 25),
+        breadthCm:
+          req.body.breadthCm != null && req.body.breadthCm !== ""
+            ? Math.max(0.5, Number(req.body.breadthCm))
+            : (existing.breadthCm ?? 20),
+        heightCm:
+          req.body.heightCm != null && req.body.heightCm !== ""
+            ? Math.max(0.5, Number(req.body.heightCm))
+            : (existing.heightCm ?? 0.8),
         inStock: req.body.inStock !== undefined ? (req.body.inStock === "true" || req.body.inStock === true) : existing.inStock,
       };
 

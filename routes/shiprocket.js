@@ -173,12 +173,13 @@ router.post("/create-order", adminAuth, async (req, res) => {
       shipping_phone: billingPhone,
       shipping_email: order.contactDetails?.email || order.user?.email || "",
       order_items: orderItems,
-      payment_method: order.payment?.paymentStatus === "SUCCESS" ? "Prepaid" : "COD",
+      // Store is prepaid-only; always send Prepaid to Shiprocket (never COD).
+      payment_method: "Prepaid",
       sub_total: Number(order.totalAmount) || 0,
-      length: DEFAULT_LENGTH,
-      breadth: DEFAULT_BREADTH,
-      height: DEFAULT_HEIGHT,
-      weight: DEFAULT_WEIGHT_KG,
+      length: Number(order.shipping?.lengthCm) > 0 ? Number(order.shipping.lengthCm) : DEFAULT_LENGTH,
+      breadth: Number(order.shipping?.breadthCm) > 0 ? Number(order.shipping.breadthCm) : DEFAULT_BREADTH,
+      height: Number(order.shipping?.heightCm) > 0 ? Number(order.shipping.heightCm) : DEFAULT_HEIGHT,
+      weight: Number(order.shipping?.weightKg) > 0 ? Number(order.shipping.weightKg) : DEFAULT_WEIGHT_KG,
       lead_source: "Ijack Notebooks",
     };
 

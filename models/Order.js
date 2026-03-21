@@ -170,6 +170,18 @@ const OrderSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  shipping: {
+    charge: { type: Number, default: 0 },
+    courierCompanyId: { type: Number, default: null },
+    courierName: { type: String, default: null },
+    etdDays: { type: String, default: null },
+    pickupPincode: { type: String, default: null },
+    deliveryPincode: { type: String, default: null },
+    weightKg: { type: Number, default: null },
+    lengthCm: { type: Number, default: null },
+    breadthCm: { type: Number, default: null },
+    heightCm: { type: Number, default: null },
+  },
   shiprocket: {
     orderId: { type: Number },
     shipmentId: { type: Number },

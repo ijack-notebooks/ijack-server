@@ -43,6 +43,21 @@ const NotebookSchema = new mongoose.Schema({
     default: 0,
     min: 0,
   },
+  lengthCm: {
+    type: Number,
+    default: 25,
+    min: 0.5,
+  },
+  breadthCm: {
+    type: Number,
+    default: 20,
+    min: 0.5,
+  },
+  heightCm: {
+    type: Number,
+    default: 0.8,
+    min: 0.5,
+  },
   createdAt: {
     type: Date,
     default: Date.now,
