@@ -271,9 +271,14 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
       });
     }
 
+    const preferredCourierCompanyId = Number(order.shipping?.courierCompanyId || 0);
+
     if (isTestMode()) {
       const mockAwb = "TEST" + String(1000000000 + Math.floor(Math.random() * 999999999)).slice(0, 10);
-      const mockCourier = "Test Courier (Test Mode)";
+      const mockCourier =
+        preferredCourierCompanyId > 0
+          ? `Preferred Courier #${preferredCourierCompanyId} (Test Mode)`
+          : "Test Courier (Test Mode)";
       const shiprocket = ensureShiprocketState(order);
       shiprocket.active = true;
       order.shiprocket.awbCode = mockAwb;
@@ -282,7 +287,11 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
         action: "awb_assigned",
         status: "AWB assigned",
         message: "[TEST MODE] AWB assigned",
-        data: { awbCode: mockAwb, courierName: mockCourier },
+        data: {
+          awbCode: mockAwb,
+          courierName: mockCourier,
+          preferredCourierCompanyId: preferredCourierCompanyId > 0 ? preferredCourierCompanyId : null,
+        },
       });
       await order.save();
       updateOrderInSupabase(order._id.toString(), {}).catch(() => {});
@@ -294,11 +303,15 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
       });
     }
 
+    const assignAwbPayload = {
+      shipment_id: shipmentId,
+      // Prefer the checkout-selected courier when available.
+      ...(preferredCourierCompanyId > 0 ? { courier_id: preferredCourierCompanyId } : {}),
+    };
+
     const data = await shiprocketFetch("/v1/external/courier/assign/awb", {
       method: "POST",
-      body: JSON.stringify({
-        shipment_id: shipmentId,
-      }),
+      body: JSON.stringify(assignAwbPayload),
     });
 
     const responseData = data?.response?.data || {};
@@ -333,7 +346,11 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
       action: "awb_assigned",
       status: "AWB assigned",
       message: "AWB assigned in Shiprocket",
-      data: { awbCode, courierName },
+      data: {
+        awbCode,
+        courierName,
+        preferredCourierCompanyId: preferredCourierCompanyId > 0 ? preferredCourierCompanyId : null,
+      },
     });
     await order.save();
 

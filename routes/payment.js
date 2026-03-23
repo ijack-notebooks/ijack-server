@@ -278,7 +278,7 @@ router.post("/initiate", auth, async (req, res) => {
     let maxLengthCm = 0;
     let maxBreadthCm = 0;
     let stackedHeightCm = 0;
-    let gstAmount = 0;
+    let gstOnOriginalSubtotal = 0;
     const orderItems = [];
 
     for (const item of items) {
@@ -300,7 +300,7 @@ router.post("/initiate", auth, async (req, res) => {
       maxBreadthCm = Math.max(maxBreadthCm, itemBreadth);
       stackedHeightCm += itemHeight * item.quantity;
       const gstPct = gstByCategory[notebook.category] ?? 0;
-      gstAmount += (itemTotal * gstPct) / 100;
+      gstOnOriginalSubtotal += (itemTotal * gstPct) / 100;
 
       orderItems.push({
         notebook: notebook._id,
@@ -308,6 +308,37 @@ router.post("/initiate", auth, async (req, res) => {
         price: notebook.price,
       });
     }
+
+    let discountAmount = 0;
+    let promoCodeId = null;
+
+    const rawPromoCode = req.body.promoCode;
+    if (rawPromoCode && String(rawPromoCode).trim()) {
+      const promo = await PromoCode.findOne({
+        code: String(rawPromoCode).trim().toUpperCase(),
+        active: true,
+      });
+      if (promo) {
+        const now = new Date();
+        const validFromOk = !promo.validFrom || new Date(promo.validFrom) <= now;
+        const validUntilOk = !promo.validUntil || new Date(promo.validUntil) >= now;
+        // Discount should apply before GST and shipping, so check min order on subtotal.
+        const minOrderOk = !promo.minOrderAmount || subtotal >= promo.minOrderAmount;
+        const usesOk = promo.maxUses == null || (promo.usedCount || 0) < promo.maxUses;
+        if (validFromOk && validUntilOk && minOrderOk && usesOk) {
+          if (promo.type === "percent") {
+            discountAmount = Math.round((subtotal * Math.min(100, Math.max(0, promo.value))) / 100);
+          } else {
+            discountAmount = Math.min(Number(promo.value) || 0, subtotal);
+          }
+          promoCodeId = promo._id;
+        }
+      }
+    }
+
+    const discountedSubtotal = Math.max(0, subtotal - discountAmount);
+    const gstDiscountRatio = subtotal > 0 ? discountedSubtotal / subtotal : 1;
+    const gstAmount = gstOnOriginalSubtotal * gstDiscountRatio;
 
     const packageData = {
       weightKg: Math.max(DEFAULT_WEIGHT_KG, Number((totalWeightGrams / 1000).toFixed(3))),
@@ -331,7 +362,8 @@ router.post("/initiate", auth, async (req, res) => {
           breadthCm: packageData.breadthCm,
           heightCm: packageData.heightCm,
           cod: 0,
-          shipmentValue: Math.round(subtotal + gstAmount),
+          // Shipment value should be after promo discount.
+          shipmentValue: Math.round(discountedSubtotal),
         });
 
         if (options.length > 0) {
@@ -351,34 +383,7 @@ router.post("/initiate", auth, async (req, res) => {
       }
     }
 
-    const preDiscountTotal = Math.round(subtotal + shippingCharge + gstAmount);
-    let totalAmount = preDiscountTotal;
-    let discountAmount = 0;
-    let promoCodeId = null;
-
-    const rawPromoCode = req.body.promoCode;
-    if (rawPromoCode && String(rawPromoCode).trim()) {
-      const promo = await PromoCode.findOne({
-        code: String(rawPromoCode).trim().toUpperCase(),
-        active: true,
-      });
-      if (promo) {
-        const now = new Date();
-        const validFromOk = !promo.validFrom || new Date(promo.validFrom) <= now;
-        const validUntilOk = !promo.validUntil || new Date(promo.validUntil) >= now;
-        const minOrderOk = !promo.minOrderAmount || preDiscountTotal >= promo.minOrderAmount;
-        const usesOk = promo.maxUses == null || (promo.usedCount || 0) < promo.maxUses;
-        if (validFromOk && validUntilOk && minOrderOk && usesOk) {
-          if (promo.type === "percent") {
-            discountAmount = Math.round((preDiscountTotal * Math.min(100, Math.max(0, promo.value))) / 100);
-          } else {
-            discountAmount = Math.min(Number(promo.value) || 0, preDiscountTotal);
-          }
-          totalAmount = Math.max(0, preDiscountTotal - discountAmount);
-          promoCodeId = promo._id;
-        }
-      }
-    }
+    const totalAmount = Math.round(discountedSubtotal + shippingCharge + gstAmount);
 
     const merchantOrderId = generateMerchantOrderId();
 
@@ -417,6 +422,9 @@ router.post("/initiate", auth, async (req, res) => {
       data: {
         amount: totalAmount,
         merchantOrderId,
+        subtotal,
+        discountedSubtotal,
+        gstAmount: Math.round(gstAmount),
         shippingCharge,
         courier: selectedShipping?.courierName || "Fallback",
       },
