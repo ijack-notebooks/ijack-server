@@ -60,6 +60,10 @@ function safePositiveNumber(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function roundTo2(value) {
+  return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+}
+
 function computeBuyXGetYDiscountFromOrderItems(items = [], buyQty, getQty) {
   const buy = Number(buyQty);
   const get = Number(getQty);
@@ -345,16 +349,16 @@ router.post("/initiate", auth, async (req, res) => {
         const usesOk = promo.maxUses == null || (promo.usedCount || 0) < promo.maxUses;
         if (validFromOk && validUntilOk && minOrderOk && usesOk) {
           if (promo.type === "percent") {
-            discountAmount = Math.round((subtotal * Math.min(100, Math.max(0, promo.value))) / 100);
+            discountAmount = roundTo2((subtotal * Math.min(100, Math.max(0, promo.value))) / 100);
             promoCodeId = promo._id;
           } else if (promo.type === "fixed") {
-            discountAmount = Math.min(Number(promo.value) || 0, subtotal);
+            discountAmount = roundTo2(Math.min(Number(promo.value) || 0, subtotal));
             promoCodeId = promo._id;
           } else if (promo.type === "buy_x_get_y") {
-            discountAmount = Math.min(
+            discountAmount = roundTo2(Math.min(
               subtotal,
               computeBuyXGetYDiscountFromOrderItems(orderItems, promo.buyQty, promo.getQty)
-            );
+            ));
             if (discountAmount > 0) {
               promoCodeId = promo._id;
             }
@@ -363,9 +367,9 @@ router.post("/initiate", auth, async (req, res) => {
       }
     }
 
-    const discountedSubtotal = Math.max(0, subtotal - discountAmount);
+    const discountedSubtotal = roundTo2(Math.max(0, subtotal - discountAmount));
     const gstDiscountRatio = subtotal > 0 ? discountedSubtotal / subtotal : 1;
-    const gstAmount = gstOnOriginalSubtotal * gstDiscountRatio;
+    const gstOnDiscountedProducts = gstOnOriginalSubtotal * gstDiscountRatio;
 
     const packageData = {
       weightKg: Math.max(DEFAULT_WEIGHT_KG, Number((totalWeightGrams / 1000).toFixed(3))),
@@ -398,7 +402,7 @@ router.post("/initiate", auth, async (req, res) => {
           selectedShipping =
             options.find((opt) => requestedCourierId && opt.courierCompanyId === requestedCourierId) ||
             options[0];
-          shippingCharge = Math.round(selectedShipping.rate);
+          shippingCharge = roundTo2(selectedShipping.rate);
           selectedShipping = {
             ...selectedShipping,
             pickupPincode,
@@ -410,7 +414,10 @@ router.post("/initiate", auth, async (req, res) => {
       }
     }
 
-    const totalAmount = Math.round(discountedSubtotal + shippingCharge + gstAmount);
+    const effectiveGstRate = subtotal > 0 ? gstOnOriginalSubtotal / subtotal : 0;
+    const gstOnShipping = shippingCharge * effectiveGstRate;
+    const gstAmount = roundTo2(gstOnDiscountedProducts + gstOnShipping);
+    const totalAmount = roundTo2(discountedSubtotal + shippingCharge + gstAmount);
 
     const merchantOrderId = generateMerchantOrderId();
 
@@ -451,7 +458,7 @@ router.post("/initiate", auth, async (req, res) => {
         merchantOrderId,
         subtotal,
         discountedSubtotal,
-        gstAmount: Math.round(gstAmount),
+        gstAmount,
         shippingCharge,
         courier: selectedShipping?.courierName || "Fallback",
       },

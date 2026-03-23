@@ -21,6 +21,10 @@ const SUPPLIER = {
 
 const HSN_DEFAULT = "4820"; // Notebooks, exercise books, registers
 
+function roundTo2(value) {
+  return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+}
+
 /**
  * Convert amount (number) to Indian Rupees and Paise in words
  */
@@ -113,22 +117,20 @@ async function buildInvoiceData(order) {
   );
 
   let subtotal = 0;
-  let totalGst = 0;
-  let totalWeightGrams = 0;
+  let gstOnOriginalSubtotal = 0;
   const lines = [];
 
   for (let i = 0; i < order.items.length; i++) {
     const item = order.items[i];
     const notebook = item.notebook || {};
-    const taxableValue = item.price * item.quantity;
+    const taxableValue = Number(item.price || 0) * Number(item.quantity || 0);
     const taxInfo = taxByCategory[notebook.category] || { gstPercentage: 0, hsn: HSN_DEFAULT };
     const gstPct = taxInfo.gstPercentage;
     const gstAmount = (taxableValue * gstPct) / 100;
     const total = taxableValue + gstAmount;
 
     subtotal += taxableValue;
-    totalGst += gstAmount;
-    totalWeightGrams += (Number(notebook.weight) || 0) * item.quantity;
+    gstOnOriginalSubtotal += gstAmount;
 
     lines.push({
       sno: i + 1,
@@ -143,18 +145,32 @@ async function buildInvoiceData(order) {
     });
   }
 
-  const shippingCharge = Math.ceil(totalWeightGrams / 500) * 26;
-  const grandTotal = Math.round(subtotal + totalGst + shippingCharge);
+  const discountAmount = roundTo2(Math.max(0, Number(order.discountAmount) || 0));
+  const discountedSubtotal = roundTo2(Math.max(0, subtotal - discountAmount));
+  const shippingCharge = roundTo2(Math.max(0, Number(order.shipping?.charge) || 0));
+
+  // Keep GST math aligned with checkout/payment: GST(products after discount + shipping).
+  const discountRatio = subtotal > 0 ? discountedSubtotal / subtotal : 1;
+  const gstOnDiscountedProducts = gstOnOriginalSubtotal * discountRatio;
+  const effectiveGstRate = subtotal > 0 ? gstOnOriginalSubtotal / subtotal : 0;
+  const gstOnShipping = shippingCharge * effectiveGstRate;
+  const totalGst = roundTo2(gstOnDiscountedProducts + gstOnShipping);
+  const computedGrandTotal = roundTo2(discountedSubtotal + shippingCharge + totalGst);
+  const grandTotal = roundTo2(
+    Number.isFinite(Number(order.totalAmount)) ? Number(order.totalAmount) : computedGrandTotal
+  );
 
   const placeOfSupply = order.address.state || "";
   const isIntrastate = placeOfSupply.toLowerCase().includes("andhra");
-  const cgst = isIntrastate ? totalGst / 2 : 0;
-  const sgst = isIntrastate ? totalGst / 2 : 0;
-  const igst = isIntrastate ? 0 : totalGst;
+  const cgst = roundTo2(isIntrastate ? totalGst / 2 : 0);
+  const sgst = roundTo2(isIntrastate ? totalGst / 2 : 0);
+  const igst = roundTo2(isIntrastate ? 0 : totalGst);
 
   return {
     lines,
-    subtotal,
+    subtotal: roundTo2(subtotal),
+    discountAmount,
+    discountedSubtotal,
     totalGst,
     shippingCharge,
     grandTotal,
@@ -309,8 +325,17 @@ async function buildInvoicePdf(order, invoiceNumber, invoiceData) {
     const summaryTop = rowY + 18;
     const leftBoxWidth = 240;
     const rightBoxWidth = pageWidth - leftBoxWidth - cardGap;
+    const invoiceTotalRowHeight = 20;
+    const totalRows = [
+      ["Taxable Amount", formatMoney(invoiceData.subtotal)],
+      ["Discount", `- ${formatMoney(invoiceData.discountAmount)}`],
+      ["Taxable After Discount", formatMoney(invoiceData.discountedSubtotal)],
+      ["Shipping Charges", formatMoney(invoiceData.shippingCharge)],
+      ["Total GST", formatMoney(invoiceData.totalGst)],
+    ];
+    const rightBoxHeight = Math.max(126, 74 + totalRows.length * invoiceTotalRowHeight + 22);
     doc.roundedRect(left, summaryTop, leftBoxWidth, 92, 10).fillAndStroke("#ffffff", border);
-    doc.roundedRect(left + leftBoxWidth + cardGap, summaryTop, rightBoxWidth, 126, 10).fillAndStroke("#ffffff", border);
+    doc.roundedRect(left + leftBoxWidth + cardGap, summaryTop, rightBoxWidth, rightBoxHeight, 10).fillAndStroke("#ffffff", border);
 
     doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Tax Summary", left + 16, summaryTop + 14);
     doc.fillColor("#334155").font("Helvetica").fontSize(10);
@@ -325,14 +350,8 @@ async function buildInvoicePdf(order, invoiceNumber, invoiceData) {
     const invoiceTotalLabelWidth = 118;
     const invoiceTotalValueX = totalsX + invoiceTotalLabelWidth;
     const invoiceTotalValueWidth = rightBoxWidth - 40 - invoiceTotalLabelWidth;
-    const invoiceTotalRowHeight = 20;
 
     doc.fillColor(accent).font("Helvetica-Bold").fontSize(11).text("Invoice Total", totalsX, summaryTop + 14);
-    const totalRows = [
-      ["Taxable Amount", formatMoney(invoiceData.subtotal)],
-      ["Total GST", formatMoney(invoiceData.totalGst)],
-      ["Shipping Charges", formatMoney(invoiceData.shippingCharge)],
-    ];
     totalRows.forEach(([label, value], index) => {
       const y = summaryTop + 40 + index * invoiceTotalRowHeight;
       doc.fillColor(labelColor).font("Helvetica").fontSize(10).text(label, totalsX, y, { width: invoiceTotalLabelWidth - 4 });
@@ -353,11 +372,11 @@ async function buildInvoicePdf(order, invoiceNumber, invoiceData) {
     const footerBoxHeight = 96;
     const pageBottom = doc.page.height - doc.page.margins.bottom;
     let footerTop;
-    if (summaryTop + 142 + footerBoxHeight > pageBottom) {
+    if (summaryTop + rightBoxHeight + 16 + footerBoxHeight > pageBottom) {
       doc.addPage({ size: "A4", margin: 50 });
       footerTop = doc.page.margins.top;
     } else {
-      footerTop = summaryTop + 142;
+      footerTop = summaryTop + rightBoxHeight + 16;
     }
 
     doc.roundedRect(left, footerTop, pageWidth, footerBoxHeight, 10).fillAndStroke("#ffffff", border);

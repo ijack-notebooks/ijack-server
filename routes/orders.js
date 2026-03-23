@@ -2,9 +2,15 @@ const express = require("express");
 const router = express.Router();
 const Order = require("../models/Order");
 const Notebook = require("../models/Notebook");
+const Invoice = require("../models/Invoice");
 const { auth } = require("../middleware/auth");
 const { storeOrderInSupabase } = require("../utils/supabaseOrders");
 const { isConfigured, isTestMode, shiprocketFetch } = require("../config/shiprocket");
+const {
+  ensureInvoiceRecordForOrder,
+  ensureInvoiceStored,
+  getInvoiceSignedUrl,
+} = require("../utils/invoice");
 
 // Create order
 router.post("/", auth, async (req, res) => {
@@ -142,6 +148,38 @@ router.get("/:id/tracking", auth, async (req, res) => {
     res.status(status).json({
       message: error.message || "Failed to fetch tracking",
     });
+  }
+});
+
+// Get signed URL for a user's own invoice PDF
+router.get("/:id/invoice", auth, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id).select("_id user payment");
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    if (order.user.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    if (order.payment?.paymentStatus !== "SUCCESS") {
+      return res.status(400).json({ message: "Invoice is available only after successful payment" });
+    }
+
+    let invoice = await Invoice.findOne({ orderId: order._id });
+    if (!invoice) {
+      invoice = await ensureInvoiceRecordForOrder(order._id);
+    }
+    if (!invoice) {
+      return res.status(404).json({ message: "Invoice not found" });
+    }
+
+    const pdfPath = await ensureInvoiceStored(invoice);
+    const url = await getInvoiceSignedUrl(pdfPath);
+    return res.json({ url, invoiceNumber: invoice.invoiceNumber || null });
+  } catch (error) {
+    return res.status(500).json({ message: error.message || "Failed to load invoice" });
   }
 });
 
