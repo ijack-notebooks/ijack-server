@@ -913,26 +913,38 @@ router.post("/promo-codes", adminAuth, async (req, res) => {
       code,
       type,
       value,
+      buyQty,
+      getQty,
       minOrderAmount,
       validFrom,
       validUntil,
       maxUses,
     } = req.body;
-    if (!code || !type || value == null) {
+    if (!code || !type) {
       return res.status(400).json({
-        message: "code, type (percent|fixed), and value are required",
+        message: "code and type (percent|fixed|buy_x_get_y) are required",
       });
     }
-    if (!["percent", "fixed"].includes(type)) {
-      return res.status(400).json({ message: "type must be percent or fixed" });
+    if (!["percent", "fixed", "buy_x_get_y"].includes(type)) {
+      return res.status(400).json({ message: "type must be percent, fixed, or buy_x_get_y" });
     }
-    if (type === "percent" && (value < 0 || value > 100)) {
+    if (type !== "buy_x_get_y" && value == null) {
+      return res.status(400).json({ message: "value is required for percent/fixed promos" });
+    }
+    if (type === "percent" && (Number(value) < 0 || Number(value) > 100)) {
       return res.status(400).json({ message: "percent value must be 0–100" });
+    }
+    if (type === "buy_x_get_y") {
+      if (!buyQty || !getQty || Number(buyQty) < 1 || Number(getQty) < 1) {
+        return res.status(400).json({ message: "buyQty and getQty are required for buy_x_get_y promos" });
+      }
     }
     const doc = await PromoCode.create({
       code: String(code).trim().toUpperCase(),
       type,
-      value: Number(value),
+      value: type === "buy_x_get_y" ? 0 : Number(value),
+      buyQty: type === "buy_x_get_y" ? Number(buyQty) : null,
+      getQty: type === "buy_x_get_y" ? Number(getQty) : null,
       minOrderAmount: minOrderAmount != null ? Number(minOrderAmount) : 0,
       validFrom: validFrom ? new Date(validFrom) : undefined,
       validUntil: validUntil ? new Date(validUntil) : null,

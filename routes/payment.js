@@ -60,6 +60,24 @@ function safePositiveNumber(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function computeBuyXGetYDiscountFromOrderItems(items = [], buyQty, getQty) {
+  const buy = Number(buyQty);
+  const get = Number(getQty);
+  if (!Number.isFinite(buy) || !Number.isFinite(get) || buy < 1 || get < 1) {
+    return 0;
+  }
+  const units = [];
+  for (const item of items) {
+    const qty = Math.max(0, Number(item.quantity) || 0);
+    const price = Math.max(0, Number(item.price) || 0);
+    for (let i = 0; i < qty; i += 1) units.push(price);
+  }
+  const freeUnits = Math.floor(units.length / (buy + get)) * get;
+  if (freeUnits <= 0) return 0;
+  units.sort((a, b) => a - b);
+  return Math.round(units.slice(0, freeUnits).reduce((sum, p) => sum + p, 0));
+}
+
 function getPickupPincodeForShipping() {
   return PICKUP_PINCODE;
 }
@@ -328,10 +346,19 @@ router.post("/initiate", auth, async (req, res) => {
         if (validFromOk && validUntilOk && minOrderOk && usesOk) {
           if (promo.type === "percent") {
             discountAmount = Math.round((subtotal * Math.min(100, Math.max(0, promo.value))) / 100);
-          } else {
+            promoCodeId = promo._id;
+          } else if (promo.type === "fixed") {
             discountAmount = Math.min(Number(promo.value) || 0, subtotal);
+            promoCodeId = promo._id;
+          } else if (promo.type === "buy_x_get_y") {
+            discountAmount = Math.min(
+              subtotal,
+              computeBuyXGetYDiscountFromOrderItems(orderItems, promo.buyQty, promo.getQty)
+            );
+            if (discountAmount > 0) {
+              promoCodeId = promo._id;
+            }
           }
-          promoCodeId = promo._id;
         }
       }
     }

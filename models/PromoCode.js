@@ -8,17 +8,29 @@ const PromoCodeSchema = new mongoose.Schema({
     trim: true,
     uppercase: true,
   },
-  /** "percent" or "fixed" */
+  /** "percent", "fixed", or "buy_x_get_y" */
   type: {
     type: String,
     required: true,
-    enum: ["percent", "fixed"],
+    enum: ["percent", "fixed", "buy_x_get_y"],
   },
-  /** Discount value: percentage (0–100) or fixed amount in ₹ */
+  /** Discount value: percentage (0–100) or fixed amount in ₹ (0 for buy_x_get_y) */
   value: {
     type: Number,
     required: true,
     min: 0,
+  },
+  /** For buy_x_get_y: buy N items */
+  buyQty: {
+    type: Number,
+    default: null,
+    min: 1,
+  },
+  /** For buy_x_get_y: get M cheapest items free */
+  getQty: {
+    type: Number,
+    default: null,
+    min: 1,
   },
   /** Optional minimum order amount (in ₹) for the code to apply */
   minOrderAmount: {
