@@ -137,6 +137,7 @@ router.get("/orders", adminAuth, async (req, res) => {
     const orders = await Order.find()
       .populate("user", "username email")
       .populate("items.notebook")
+      .populate("promoCode", "code type")
       .sort({ createdAt: -1 });
     res.json(orders);
   } catch (error) {
@@ -332,7 +333,8 @@ router.get("/orders/:id", adminAuth, async (req, res) => {
   try {
     const order = await Order.findById(req.params.id)
       .populate("user", "username email")
-      .populate("items.notebook");
+      .populate("items.notebook")
+      .populate("promoCode", "code type");
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
@@ -366,7 +368,8 @@ router.patch("/orders/:id/status", adminAuth, async (req, res) => {
       { new: true }
     )
       .populate("user", "username email")
-      .populate("items.notebook");
+      .populate("items.notebook")
+      .populate("promoCode", "code type");
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
@@ -390,7 +393,8 @@ router.post("/orders/:id/cancel", adminAuth, async (req, res) => {
   try {
     const order = await Order.findById(req.params.id)
       .populate("user", "username email")
-      .populate("items.notebook");
+      .populate("items.notebook")
+      .populate("promoCode", "code type");
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
@@ -414,7 +418,8 @@ router.post("/orders/:id/cancel", adminAuth, async (req, res) => {
     );
     const updated = await Order.findById(req.params.id)
       .populate("user", "username email")
-      .populate("items.notebook");
+      .populate("items.notebook")
+      .populate("promoCode", "code type");
     res.json(updated);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -428,7 +433,8 @@ router.post("/orders/:id/refund", adminAuth, async (req, res) => {
   try {
     order = await Order.findById(req.params.id)
       .populate("user", "username email")
-      .populate("items.notebook");
+      .populate("items.notebook")
+      .populate("promoCode", "code type");
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
