@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const path = require("path");
 const fs = require("fs");
+const axios = require("axios");
 const Order = require("../models/Order");
 const User = require("../models/User");
 const Notebook = require("../models/Notebook");
@@ -29,6 +30,39 @@ const {
   initiateZwitchRefund,
 } = require("../utils/orderOperations");
 const { appendPaymentHistory } = require("../utils/paymentHistory");
+const { generateAndSendInvoice } = require("../utils/invoice");
+
+const ZWITCH_PG_ACCESS_KEY = process.env.ZWITCH_PG_ACCESS_KEY;
+const ZWITCH_PG_SECRET_KEY = process.env.ZWITCH_PG_SECRET_KEY;
+const ZWITCH_ENV = (process.env.ZWITCH_ENVIRONMENT || "sandbox").toLowerCase();
+const ZWITCH_BASE = "https://api.zwitch.io";
+const ZWITCH_PG_PATH = ZWITCH_ENV === "production" ? "/v1/pg" : "/v1/pg/sandbox";
+
+function getZwitchAuthHeader() {
+  return { Authorization: `Bearer ${ZWITCH_PG_ACCESS_KEY}:${ZWITCH_PG_SECRET_KEY}` };
+}
+
+function normalizePaymentMethod(rawTypeName) {
+  if (!rawTypeName || typeof rawTypeName !== "string") return null;
+  const t = rawTypeName.toLowerCase().trim().replace(/[-\s]+/g, "_");
+  if (t.includes("net") && t.includes("bank")) return "netbanking";
+  if (t.includes("credit") && t.includes("card")) return "card";
+  if (t.includes("debit") && t.includes("card")) return "card";
+  if (t.includes("card")) return "card";
+  if (t.includes("upi")) return "upi";
+  return rawTypeName;
+}
+
+function extractPaymentMethodFromPayload(payload = {}) {
+  return normalizePaymentMethod(
+    payload?.type_name ||
+      payload?.payment?.type_name ||
+      payload?.payment_instrument?.type_name ||
+      payload?.payment_instrument?.type ||
+      payload?.payment_method ||
+      payload?.paid_mode
+  );
+}
 
 // ——— Admin users (super-admin only) ———
 router.get("/admins", adminAuth, superAdminOnly, async (req, res) => {
@@ -390,7 +424,7 @@ router.patch("/orders/:id/status", adminAuth, async (req, res) => {
 });
 
 // Manually update payment status (admin only)
-router.patch("/orders/:id/payment-status", adminAuth, async (req, res) => {
+const updatePaymentStatusHandler = async (req, res) => {
   try {
     const { paymentStatus } = req.body || {};
     const validStatuses = ["PENDING", "SUCCESS", "FAILED", "CANCELLED"];
@@ -443,6 +477,111 @@ router.patch("/orders/:id/payment-status", adminAuth, async (req, res) => {
     res.json(order);
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+router.patch("/orders/:id/payment-status", adminAuth, updatePaymentStatusHandler);
+// Compatibility fallback for environments/proxies where PATCH is restricted.
+router.post("/orders/:id/payment-status", adminAuth, updatePaymentStatusHandler);
+
+// Poll ZWITCH and refresh payment status for an order.
+router.post("/orders/:id/payment-status/refresh", adminAuth, async (req, res) => {
+  try {
+    if (!ZWITCH_PG_ACCESS_KEY || !ZWITCH_PG_SECRET_KEY) {
+      return res.status(503).json({ message: "ZWITCH PG keys are not configured" });
+    }
+
+    const order = await Order.findById(req.params.id)
+      .populate("user", "username email")
+      .populate("items.notebook")
+      .populate("promoCode", "code type");
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const tokenId = order.payment?.zwitchPaymentTokenId;
+    if (!tokenId) {
+      return res.status(400).json({ message: "No ZWITCH payment token found for this order" });
+    }
+
+    const previousStatus = order.payment?.paymentStatus || "PENDING";
+    const statusResponse = await axios.get(
+      `${ZWITCH_BASE}${ZWITCH_PG_PATH}/payment_token/${tokenId}/payment`,
+      { headers: getZwitchAuthHeader() }
+    );
+    const data = statusResponse.data || {};
+    const paymentStatus = data?.status;
+    const tokenStatus = data?.payment_token?.status;
+    const method = extractPaymentMethodFromPayload(data);
+    if (method) order.payment.paymentMethod = method;
+
+    if (paymentStatus === "captured" || tokenStatus === "paid") {
+      const becameSuccess = previousStatus !== "SUCCESS";
+      order.payment.paymentStatus = "SUCCESS";
+      if (order.status === "pending") {
+        order.status = "processing";
+      }
+      if (data?.id) {
+        order.payment.paymentTransactionId = data.id;
+      }
+      if (becameSuccess) {
+        appendPaymentHistory(order, {
+          action: "payment_captured",
+          status: "SUCCESS",
+          message: "Payment captured after admin refresh",
+          data: { paymentId: data?.id || null, tokenId },
+        });
+        for (const item of order.items || []) {
+          await Notebook.findByIdAndUpdate(item.notebook, { $inc: { stockQuantity: -item.quantity } });
+        }
+        if (order.promoCode) {
+          await PromoCode.findByIdAndUpdate(order.promoCode, { $inc: { usedCount: 1 } });
+        }
+      }
+      await order.save();
+      updateOrderInSupabase(order._id.toString(), {
+        status: order.status,
+        payment: order.payment,
+      }).catch((err) => console.error("Failed to update order in Supabase:", err));
+      if (becameSuccess) {
+        generateAndSendInvoice(order._id).catch((err) =>
+          console.error("Failed to generate/send invoice:", err)
+        );
+      }
+    } else if (paymentStatus === "failed") {
+      if (previousStatus !== "FAILED") {
+        appendPaymentHistory(order, {
+          action: "payment_failed",
+          status: "FAILED",
+          message: "Payment failed after admin refresh",
+          data: { tokenId },
+        });
+      }
+      order.payment.paymentStatus = "FAILED";
+      await order.save();
+      updateOrderInSupabase(order._id.toString(), { payment: order.payment }).catch(() => {});
+    } else {
+      await order.save();
+      updateOrderInSupabase(order._id.toString(), { payment: order.payment }).catch(() => {});
+    }
+
+    const updated = await Order.findById(req.params.id)
+      .populate("user", "username email")
+      .populate("items.notebook")
+      .populate("promoCode", "code type");
+
+    return res.json({
+      order: updated,
+      gatewayStatus: paymentStatus || null,
+      gatewayTokenStatus: tokenStatus || null,
+      previousStatus,
+      currentStatus: updated?.payment?.paymentStatus || null,
+    });
+  } catch (error) {
+    return res.status(error.response?.status || 500).json({
+      message: error.response?.data?.message || error.message || "Failed to refresh payment status",
+    });
   }
 });
 
