@@ -28,6 +28,7 @@ const {
   cancelShiprocketShipment,
   initiateZwitchRefund,
 } = require("../utils/orderOperations");
+const { appendPaymentHistory } = require("../utils/paymentHistory");
 
 // ——— Admin users (super-admin only) ———
 router.get("/admins", adminAuth, superAdminOnly, async (req, res) => {
@@ -380,6 +381,63 @@ router.patch("/orders/:id/status", adminAuth, async (req, res) => {
       status: order.status,
     }).catch((err) => {
       console.error("Failed to update order in Supabase:", err);
+    });
+
+    res.json(order);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Manually update payment status (admin only)
+router.patch("/orders/:id/payment-status", adminAuth, async (req, res) => {
+  try {
+    const { paymentStatus } = req.body || {};
+    const validStatuses = ["PENDING", "SUCCESS", "FAILED", "CANCELLED"];
+    if (!validStatuses.includes(paymentStatus)) {
+      return res.status(400).json({ message: "Invalid payment status" });
+    }
+
+    const order = await Order.findById(req.params.id)
+      .populate("user", "username email")
+      .populate("items.notebook")
+      .populate("promoCode", "code type");
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const previousStatus = order.payment?.paymentStatus || "PENDING";
+    if (previousStatus === paymentStatus) {
+      return res.json(order);
+    }
+
+    order.payment = order.payment || {};
+    order.payment.paymentStatus = paymentStatus;
+    if (paymentStatus !== "SUCCESS") {
+      // Manual move away from success should clear refunded timestamp to avoid conflicting state.
+      if (order.payment.refundedAt) order.payment.refundedAt = null;
+    }
+    if (paymentStatus === "SUCCESS" && order.status === "pending") {
+      order.status = "processing";
+    }
+
+    appendPaymentHistory(order, {
+      action: "admin_payment_status_override",
+      status: paymentStatus,
+      message: `Payment status changed manually by admin (${previousStatus} -> ${paymentStatus}).`,
+      data: {
+        previousStatus,
+        updatedByAdminId: req.admin?._id?.toString() || null,
+      },
+    });
+
+    await order.save();
+    updateOrderInSupabase(order._id.toString(), {
+      status: order.status,
+      payment: order.payment,
+    }).catch((err) => {
+      console.error("Failed to update order payment in Supabase:", err);
     });
 
     res.json(order);
