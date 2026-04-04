@@ -55,6 +55,7 @@ async function cancelShiprocketShipment(order, options = {}) {
   const {
     source = "admin",
     reason = "Shipment cancelled",
+    cancellationReason = "",
     strict = false,
   } = options;
 
@@ -88,7 +89,10 @@ async function cancelShiprocketShipment(order, options = {}) {
       action: "shipment_cancelled",
       status: "Cancelled",
       message: `[TEST MODE] ${reason}`,
-      data: { source },
+      data: {
+        source,
+        cancellationReason: cancellationReason || null,
+      },
     });
     return { cancelled: true, testMode: true };
   }
@@ -129,7 +133,11 @@ async function cancelShiprocketShipment(order, options = {}) {
     action: "shipment_cancelled",
     status: "Cancelled",
     message: `${reason} (${source})`,
-    data,
+    data: {
+      ...(data && typeof data === "object" ? data : { response: data }),
+      source,
+      cancellationReason: cancellationReason || null,
+    },
   });
 
   return {

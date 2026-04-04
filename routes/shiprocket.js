@@ -6,6 +6,7 @@
 const express = require("express");
 const router = express.Router();
 const Order = require("../models/Order");
+const Notebook = require("../models/Notebook");
 const { adminAuth } = require("../middleware/adminAuth");
 const {
   getPickupLocation,
@@ -22,6 +23,66 @@ const DEFAULT_WEIGHT_KG = 0.5;
 const DEFAULT_LENGTH = 25;
 const DEFAULT_BREADTH = 20;
 const DEFAULT_HEIGHT = 2;
+const PICKUP_PINCODE = "530007";
+
+function normalizePincode(value) {
+  return String(value || "").replace(/\D/g, "").slice(0, 6);
+}
+
+function safePositiveNumber(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+async function fetchShiprocketCourierOptions({
+  pickupPincode,
+  deliveryPincode,
+  weightKg,
+  lengthCm,
+  breadthCm,
+  heightCm,
+  cod = 0,
+  shipmentValue = 0,
+}) {
+  const params = new URLSearchParams({
+    pickup_postcode: String(pickupPincode),
+    delivery_postcode: String(deliveryPincode),
+    weight: String(weightKg),
+    cod: String(cod ? 1 : 0),
+    length: String(lengthCm),
+    breadth: String(breadthCm),
+    height: String(heightCm),
+    declared_value: String(Math.max(0, Number(shipmentValue) || 0)),
+  });
+
+  const data = await shiprocketFetch(`/v1/external/courier/serviceability/?${params.toString()}`, {
+    method: "GET",
+  });
+  const rows = data?.data?.available_courier_companies || data?.available_courier_companies || [];
+
+  return rows
+    .map((row) => {
+      const courierCompanyId = Number(row?.courier_company_id ?? row?.id ?? 0);
+      const courierName =
+        row?.courier_name || row?.courier_company_name || row?.name || "Courier";
+      const rate = Number(
+        row?.freight_charge ??
+          row?.rate ??
+          row?.courier_charge ??
+          row?.total_charge ??
+          row?.cod_charges,
+      );
+      const etdDays = row?.estimated_delivery_days || row?.etd || row?.eta || null;
+      return {
+        courierCompanyId,
+        courierName,
+        rate: Number.isFinite(rate) && rate > 0 ? rate : null,
+        etdDays: etdDays != null ? String(etdDays) : null,
+      };
+    })
+    .filter((x) => x.rate != null)
+    .sort((a, b) => a.rate - b.rate);
+}
 
 // Check if Shiprocket is configured (and whether test mode is on)
 router.get("/config", adminAuth, (req, res) => {
@@ -29,6 +90,112 @@ router.get("/config", adminAuth, (req, res) => {
     configured: isConfigured(),
     testMode: isTestMode(),
   });
+});
+
+// Get live courier options for an existing order (admin use; pricing mirrors checkout).
+router.get("/courier-options/:orderId", adminAuth, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    if (!orderId) {
+      return res.status(400).json({ message: "orderId is required" });
+    }
+
+    const order = await Order.findById(orderId).populate("items.notebook", "weight lengthCm breadthCm heightCm");
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const normalizedDeliveryPincode = normalizePincode(order.address?.zipCode);
+    if (!normalizedDeliveryPincode || normalizedDeliveryPincode.length !== 6) {
+      return res.status(400).json({ message: "Order must have a valid 6-digit delivery pincode" });
+    }
+
+    const items = Array.isArray(order.items) ? order.items : [];
+    if (!items.length) {
+      return res.status(400).json({ message: "Order has no items" });
+    }
+
+    let totalWeightGrams = 0;
+    let maxLengthCm = 0;
+    let maxBreadthCm = 0;
+    let stackedHeightCm = 0;
+
+    for (const item of items) {
+      const qty = Math.max(1, Number(item.quantity) || 1);
+      let notebook = item.notebook;
+
+      if (!notebook || typeof notebook !== "object" || !("weight" in notebook)) {
+        notebook = await Notebook.findById(item.notebook).select("weight lengthCm breadthCm heightCm");
+      }
+      if (!notebook) continue;
+
+      totalWeightGrams += (Number(notebook.weight) || 0) * qty;
+      const itemLength = safePositiveNumber(notebook.lengthCm, DEFAULT_LENGTH);
+      const itemBreadth = safePositiveNumber(notebook.breadthCm, DEFAULT_BREADTH);
+      const itemHeight = safePositiveNumber(notebook.heightCm, DEFAULT_HEIGHT);
+      maxLengthCm = Math.max(maxLengthCm, itemLength);
+      maxBreadthCm = Math.max(maxBreadthCm, itemBreadth);
+      stackedHeightCm += itemHeight * qty;
+    }
+
+    const packageData = {
+      weightKg: Math.max(DEFAULT_WEIGHT_KG, Number((totalWeightGrams / 1000).toFixed(3))),
+      lengthCm: Number(Math.max(0.5, maxLengthCm || DEFAULT_LENGTH).toFixed(2)),
+      breadthCm: Number(Math.max(0.5, maxBreadthCm || DEFAULT_BREADTH).toFixed(2)),
+      heightCm: Number(Math.max(0.5, stackedHeightCm || DEFAULT_HEIGHT).toFixed(2)),
+    };
+
+    if (!isConfigured()) {
+      const fallbackRate = Math.ceil(totalWeightGrams / 500) * 26;
+      return res.json({
+        fallback: true,
+        pickupPincode: PICKUP_PINCODE,
+        deliveryPincode: normalizedDeliveryPincode,
+        package: packageData,
+        options: [
+          {
+            courierCompanyId: 0,
+            courierName: "Standard Shipping",
+            rate: fallbackRate,
+            etdDays: "3-7",
+          },
+        ],
+        customerChoice: {
+          courierCompanyId: Number(order.shipping?.courierCompanyId || 0) || null,
+          courierName: order.shipping?.courierName || null,
+        },
+      });
+    }
+
+    const options = await fetchShiprocketCourierOptions({
+      pickupPincode: PICKUP_PINCODE,
+      deliveryPincode: normalizedDeliveryPincode,
+      weightKg: packageData.weightKg,
+      lengthCm: packageData.lengthCm,
+      breadthCm: packageData.breadthCm,
+      heightCm: packageData.heightCm,
+      cod: 0,
+      shipmentValue: Number(order.totalAmount) || 0,
+    });
+
+    return res.json({
+      fallback: false,
+      pickupPincode: PICKUP_PINCODE,
+      deliveryPincode: normalizedDeliveryPincode,
+      package: packageData,
+      options,
+      customerChoice: {
+        courierCompanyId: Number(order.shipping?.courierCompanyId || 0) || null,
+        courierName: order.shipping?.courierName || null,
+      },
+    });
+  } catch (error) {
+    console.error("Shiprocket courier options error:", error);
+    return res.status(error.status || 500).json({
+      message: error.message || "Failed to fetch courier options",
+      error: error.response || undefined,
+    });
+  }
 });
 
 // Create order in Shiprocket (adhoc) from our MongoDB order
@@ -146,8 +313,18 @@ router.post("/create-order", adminAuth, async (req, res) => {
     const orderDate = order.createdAt
       ? new Date(order.createdAt).toISOString().split("T")[0]
       : new Date().toISOString().split("T")[0];
+    const baseExternalOrderId = String(order.payment?.merchantOrderId || order._id.toString());
+    const shipmentCreateAttempts = (Array.isArray(order.shiprocket?.history) ? order.shiprocket.history : [])
+      .filter((entry) => entry?.action === "shipment_created")
+      .length;
+    // Keep Shiprocket order_id unique per shipment attempt so cancelled shipments
+    // do not get tied to stale AWB state on re-creation.
+    const externalOrderId =
+      shipmentCreateAttempts > 0
+        ? `${baseExternalOrderId}-R${shipmentCreateAttempts + 1}`
+        : baseExternalOrderId;
     const payload = {
-      order_id: order.payment?.merchantOrderId || order._id.toString(),
+      order_id: externalOrderId,
       order_date: orderDate,
       pickup_location: pickupLocation,
       channel_id: "",
@@ -215,7 +392,7 @@ router.post("/create-order", adminAuth, async (req, res) => {
       action: "shipment_created",
       status: "Created",
       message: "Shipment created in Shiprocket",
-      data: { shiprocketOrderId: srOrderId, shipmentId },
+      data: { shiprocketOrderId: srOrderId, shipmentId, externalOrderId },
     });
     if (order.status === "pending") {
       order.status = "processing";
@@ -254,7 +431,7 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
       return res.status(503).json({ message: "Shiprocket not configured" });
     }
 
-    const { orderId } = req.body; // our MongoDB order _id
+    const { orderId, courierCompanyId: requestedCourierCompanyId, courierName: requestedCourierName } = req.body; // our MongoDB order _id
     if (!orderId) {
       return res.status(400).json({ message: "orderId is required" });
     }
@@ -271,14 +448,18 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
       });
     }
 
-    const preferredCourierCompanyId = Number(order.shipping?.courierCompanyId || 0);
+    const requestedCourierId = Number(requestedCourierCompanyId || 0);
+    const preferredCourierCompanyId = requestedCourierId > 0
+      ? requestedCourierId
+      : Number(order.shipping?.courierCompanyId || 0);
 
     if (isTestMode()) {
       const mockAwb = "TEST" + String(1000000000 + Math.floor(Math.random() * 999999999)).slice(0, 10);
       const mockCourier =
-        preferredCourierCompanyId > 0
+        String(requestedCourierName || "").trim() ||
+        (preferredCourierCompanyId > 0
           ? `Preferred Courier #${preferredCourierCompanyId} (Test Mode)`
-          : "Test Courier (Test Mode)";
+          : "Test Courier (Test Mode)");
       const shiprocket = ensureShiprocketState(order);
       shiprocket.active = true;
       order.shiprocket.awbCode = mockAwb;
@@ -291,6 +472,7 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
           awbCode: mockAwb,
           courierName: mockCourier,
           preferredCourierCompanyId: preferredCourierCompanyId > 0 ? preferredCourierCompanyId : null,
+          requestedCourierName: String(requestedCourierName || "").trim() || null,
         },
       });
       await order.save();
@@ -303,53 +485,194 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
       });
     }
 
-    const assignAwbPayload = {
-      shipment_id: shipmentId,
-      // Prefer the checkout-selected courier when available.
+    const buildAssignPayload = (sid) => ({
+      shipment_id: sid,
       ...(preferredCourierCompanyId > 0 ? { courier_id: preferredCourierCompanyId } : {}),
-    };
-
-    const data = await shiprocketFetch("/v1/external/courier/assign/awb", {
-      method: "POST",
-      body: JSON.stringify(assignAwbPayload),
     });
 
-    const responseData = data?.response?.data || {};
-    const directAwbCode = data?.awb_code ?? data?.awb;
-    const nestedAwbCode = responseData?.awb_code ?? responseData?.awb;
-    const assignError = responseData?.awb_assign_error || data?.message || data?.error || "";
-    const alreadyAssignedMatch =
-      typeof assignError === "string"
-        ? assignError.match(/awb\s*-\s*([A-Z0-9]+)/i)
-        : null;
-    const awbCode = directAwbCode || nestedAwbCode || alreadyAssignedMatch?.[1] || null;
-    const courierName =
-      data?.courier_name ??
-      data?.courier ??
-      responseData?.courier_name ??
-      responseData?.courier ??
-      (responseData?.courier_id ? `Courier #${responseData.courier_id}` : "");
+    const parseAssignResponse = (data) => {
+      const responseData = data?.response?.data || {};
+      const directAwbCode = data?.awb_code ?? data?.awb;
+      const nestedAwbCode = responseData?.awb_code ?? responseData?.awb;
+      const assignError = responseData?.awb_assign_error || data?.message || data?.error || "";
+      const alreadyAssignedMatch =
+        typeof assignError === "string"
+          ? assignError.match(/awb\s*-\s*([A-Z0-9]+)/i)
+          : null;
+      const awbCode = directAwbCode || nestedAwbCode || alreadyAssignedMatch?.[1] || null;
+      const cName =
+        data?.courier_name ??
+        data?.courier ??
+        responseData?.courier_name ??
+        responseData?.courier ??
+        (responseData?.courier_id ? `Courier #${responseData.courier_id}` : "");
+      const isCancelledAwb =
+        typeof assignError === "string" &&
+        /awb.*already.*assigned/i.test(assignError) &&
+        /status\s*-\s*cancelled/i.test(assignError);
+      return { awbCode, courierName: cName, assignError, isCancelledAwb };
+    };
 
-    if (!awbCode) {
+    let data = await shiprocketFetch("/v1/external/courier/assign/awb", {
+      method: "POST",
+      body: JSON.stringify(buildAssignPayload(shipmentId)),
+    });
+
+    let parsed = parseAssignResponse(data);
+
+    // Shiprocket ties the old cancelled AWB to this shipment_id.
+    // Auto-recover: cancel old SR order, create fresh one, retry AWB.
+    if (parsed.isCancelledAwb || (!parsed.awbCode && parsed.assignError)) {
+      const errStr = String(parsed.assignError || "");
+      if (/awb.*already.*assigned/i.test(errStr) && /cancel/i.test(errStr)) {
+        console.log("assign-awb: stale cancelled AWB detected, auto-recovering...");
+        const srOrderId = order.shiprocket?.orderId;
+        if (srOrderId) {
+          try {
+            await shiprocketFetch("/v1/external/orders/cancel", {
+              method: "POST",
+              body: JSON.stringify({ ids: [Number(srOrderId)] }),
+            });
+          } catch (cancelErr) {
+            console.warn("assign-awb: old SR order cancel failed (may already be cancelled):", cancelErr.message);
+          }
+
+          appendShiprocketHistory(order, {
+            action: "shipment_cancelled",
+            status: "Cancelled",
+            message: "Auto-cancelled stale Shiprocket order before AWB retry",
+            data: { source: "awb_auto_retry", oldSrOrderId: srOrderId, oldShipmentId: shipmentId },
+          });
+
+          const reOrder = await Order.findById(orderId)
+            .populate("user", "username email")
+            .populate("items.notebook");
+          if (!reOrder) {
+            return res.status(404).json({ message: "Order not found during auto-retry" });
+          }
+
+          const nameParts = (reOrder.contactDetails?.name || "Customer").trim().split(" ");
+          const rFirstName = nameParts[0] || "Customer";
+          const rLastName = nameParts.slice(1).join(" ") || "";
+          const rPickupLocation = await getPickupLocation();
+          const rBillingPhone =
+            String(reOrder.contactDetails?.phone || "").replace(/\D/g, "").slice(-10) || "9999999999";
+          const rBillingPincode = String(reOrder.address?.zipCode || "").replace(/\D/g, "").slice(0, 6);
+          const rItems = Array.isArray(reOrder.items) ? reOrder.items : [];
+          const rOrderItems = rItems.map((item) => ({
+            name: item.notebook?.name || "Notebook",
+            sku: item.notebook?._id?.toString() || `item-${item._id}`,
+            units: Number(item.quantity) || 1,
+            unit_price: Number(item.price) || 0,
+            selling_price: Number(item.price) || 0,
+          }));
+          const rOrderDate = reOrder.createdAt
+            ? new Date(reOrder.createdAt).toISOString().split("T")[0]
+            : new Date().toISOString().split("T")[0];
+          const baseId = String(reOrder.payment?.merchantOrderId || reOrder._id.toString());
+          const prevAttempts = (Array.isArray(order.shiprocket?.history) ? order.shiprocket.history : [])
+            .filter((e) => e?.action === "shipment_created").length;
+          const newExternalOrderId = `${baseId}-R${prevAttempts + 1}`;
+          const newPayload = {
+            order_id: newExternalOrderId,
+            order_date: rOrderDate,
+            pickup_location: rPickupLocation,
+            channel_id: "",
+            billing_customer_name: rFirstName,
+            billing_last_name: rLastName,
+            billing_address: reOrder.address?.street || "Address",
+            billing_address_2: "",
+            billing_city: reOrder.address?.city || "",
+            billing_pincode: rBillingPincode,
+            billing_state: reOrder.address?.state || "",
+            billing_country: reOrder.address?.country || "India",
+            billing_email: reOrder.contactDetails?.email || reOrder.user?.email || "",
+            billing_phone: rBillingPhone,
+            shipping_is_billing: 1,
+            shipping_customer_name: rFirstName,
+            shipping_last_name: rLastName,
+            shipping_address: reOrder.address?.street || "Address",
+            shipping_address_2: "",
+            shipping_city: reOrder.address?.city || "",
+            shipping_pincode: rBillingPincode,
+            shipping_state: reOrder.address?.state || "",
+            shipping_country: reOrder.address?.country || "India",
+            shipping_phone: rBillingPhone,
+            shipping_email: reOrder.contactDetails?.email || reOrder.user?.email || "",
+            order_items: rOrderItems,
+            payment_method: "Prepaid",
+            sub_total: Number(reOrder.totalAmount) || 0,
+            length: Number(reOrder.shipping?.lengthCm) > 0 ? Number(reOrder.shipping.lengthCm) : DEFAULT_LENGTH,
+            breadth: Number(reOrder.shipping?.breadthCm) > 0 ? Number(reOrder.shipping.breadthCm) : DEFAULT_BREADTH,
+            height: Number(reOrder.shipping?.heightCm) > 0 ? Number(reOrder.shipping.heightCm) : DEFAULT_HEIGHT,
+            weight: Number(reOrder.shipping?.weightKg) > 0 ? Number(reOrder.shipping.weightKg) : DEFAULT_WEIGHT_KG,
+            lead_source: "Ijack Notebooks",
+          };
+
+          const newData = await shiprocketFetch("/v1/external/orders/create/adhoc", {
+            method: "POST",
+            body: JSON.stringify(newPayload),
+          });
+
+          const newSrOrderId = newData?.order_id;
+          const newShipmentId = newData?.shipment_id ?? newData?.id;
+          if (newSrOrderId == null) {
+            throw new Error(newData?.message || "Shiprocket did not return order_id on auto-retry");
+          }
+
+          const existingHistory = Array.isArray(order.shiprocket?.history) ? order.shiprocket.history : [];
+          order.shiprocket = {
+            orderId: newSrOrderId,
+            shipmentId: newShipmentId,
+            awbCode: null,
+            courierName: null,
+            labelUrl: null,
+            active: true,
+            lastAction: null,
+            trackingStatus: null,
+            trackingUrl: null,
+            cancelledAt: null,
+            history: existingHistory,
+            createdAt: new Date(),
+          };
+          appendShiprocketHistory(order, {
+            action: "shipment_created",
+            status: "Created",
+            message: "Auto-created new Shiprocket order after stale AWB (retry)",
+            data: { shiprocketOrderId: newSrOrderId, shipmentId: newShipmentId, externalOrderId: newExternalOrderId },
+          });
+          await order.save();
+
+          data = await shiprocketFetch("/v1/external/courier/assign/awb", {
+            method: "POST",
+            body: JSON.stringify(buildAssignPayload(newShipmentId)),
+          });
+          parsed = parseAssignResponse(data);
+        }
+      }
+    }
+
+    if (!parsed.awbCode) {
       const message =
-        typeof assignError === "string" && assignError
-          ? assignError
+        typeof parsed.assignError === "string" && parsed.assignError
+          ? parsed.assignError
           : "Shiprocket did not return an AWB number";
       return res.status(422).json({ message });
     }
 
     const shiprocket = ensureShiprocketState(order);
     shiprocket.active = true;
-    order.shiprocket.awbCode = awbCode;
-    order.shiprocket.courierName = courierName;
+    order.shiprocket.awbCode = parsed.awbCode;
+    order.shiprocket.courierName = parsed.courierName;
     appendShiprocketHistory(order, {
       action: "awb_assigned",
       status: "AWB assigned",
       message: "AWB assigned in Shiprocket",
       data: {
-        awbCode,
-        courierName,
+        awbCode: parsed.awbCode,
+        courierName: parsed.courierName,
         preferredCourierCompanyId: preferredCourierCompanyId > 0 ? preferredCourierCompanyId : null,
+        requestedCourierName: String(requestedCourierName || "").trim() || null,
       },
     });
     await order.save();
@@ -358,8 +681,8 @@ router.post("/assign-awb", adminAuth, async (req, res) => {
 
     res.json({
       message: "AWB assigned",
-      awb_code: awbCode,
-      courier_name: courierName,
+      awb_code: parsed.awbCode,
+      courier_name: parsed.courierName,
       order: order,
     });
   } catch (error) {
@@ -653,9 +976,14 @@ router.get("/track/:awb", adminAuth, async (req, res) => {
 // If a pickup was scheduled, cancel it first (Shiprocket does not auto-cancel pickup when order is cancelled).
 router.post("/cancel", adminAuth, async (req, res) => {
   try {
-    const { orderId } = req.body; // our MongoDB order _id
+    const { orderId, cancellationReason } = req.body; // our MongoDB order _id
     if (!orderId) {
       return res.status(400).json({ message: "orderId is required" });
+    }
+
+    const normalizedReason = String(cancellationReason || "").trim();
+    if (!normalizedReason) {
+      return res.status(400).json({ message: "Shipment cancellation reason is required" });
     }
 
     const order = await Order.findById(orderId);
@@ -665,11 +993,16 @@ router.post("/cancel", adminAuth, async (req, res) => {
 
     const shipmentResult = await cancelShiprocketShipment(order, {
       source: "shipment_page",
-      reason: "Shipment cancelled in Shiprocket",
+      reason: `Shipment cancelled in Shiprocket — ${normalizedReason}`,
+      cancellationReason: normalizedReason,
       strict: true,
     });
 
-    order.status = "cancelled";
+    // Shipment cancellation should not cancel/refund the order.
+    // Keep fulfilment open so admin can create a fresh shipment.
+    if (order.status !== "cancelled" && order.status !== "delivered" && !order.payment?.refundedAt) {
+      order.status = "processing";
+    }
 
     await order.save();
     updateOrderInSupabase(orderId.toString(), {
@@ -678,8 +1011,9 @@ router.post("/cancel", adminAuth, async (req, res) => {
     }).catch(() => {});
 
     res.json({
-      message: "Shipment cancelled",
+      message: "Shipment cancelled. Order remains active for re-creating shipment.",
       data: shipmentResult.data,
+      cancelled: shipmentResult.cancelled === true,
       order,
     });
   } catch (error) {

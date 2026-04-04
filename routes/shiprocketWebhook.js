@@ -214,7 +214,11 @@ router.post("/webhook", async (req, res) => {
     if (nextOrderStatus === "delivered") {
       order.status = "delivered";
     } else if (nextOrderStatus === "cancelled" && order.status !== "delivered") {
-      order.status = "cancelled";
+      // Shipment cancellation should not auto-cancel the customer order unless it
+      // was explicitly cancelled via order-cancel/refund flows.
+      if (order.status !== "cancelled" && !order.payment?.refundedAt) {
+        order.status = "processing";
+      }
     } else if (
       nextOrderStatus === "shipped" &&
       order.status !== "delivered" &&
